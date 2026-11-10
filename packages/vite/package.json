@@ -1,0 +1,38 @@
+{
+  "name": "@stream3d/vite",
+  "version": "0.1.0",
+  "description": "Automatic progressive asset imports for Stream3D",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./client.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "client.d.ts"
+  ],
+  "dependencies": {
+    "@stream3d/core": "0.1.0",
+    "@stream3d/compiler": "0.1.0"
+  },
+  "peerDependencies": {
+    "vite": ">=7 <9"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ziyu/stream3d.git",
+    "directory": "packages/vite"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

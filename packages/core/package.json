@@ -1,0 +1,25 @@
+{
+  "name": "@stream3d/core",
+  "version": "0.1.0",
+  "description": "Streaming asset contracts, scheduling and reference-counted resources",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ziyu/stream3d.git",
+    "directory": "packages/core"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b1519" />
+    <meta name="description" content="Scroll through interactive 3D scenes. Stream3D loads coarse detail first, refines as you stay, and shares cached resources when you return." />
+    <title>Stream3D — The scroll feed</title>
+  </head>
+  <body>
+    <canvas id="feed-canvas" aria-label="Interactive sculpture. Drag sideways to rotate; scroll or swipe vertically for the next scene."></canvas>
+    <header class="feed-header">
+      <a href="./" class="brand" aria-label="Return to the Stream3D playground">stream<span>3d</span><small> / FEED</small></a>
+      <a href="./" class="back-link">Open inspector ↗</a>
+    </header>
+    <main aria-label="3D content feed">
+      <section class="feed-page" aria-label="Orbit, scene 1 of 3"></section>
+      <section class="feed-page" aria-label="Bloom, scene 2 of 3"></section>
+      <section class="feed-page" aria-label="Helix, scene 3 of 3"></section>
+    </main>
+    <div class="feed-loading" id="feed-loading" role="status">Preparing the first representation…</div>
+    <aside class="feed-caption" aria-live="polite">
+      <p class="eyebrow" id="feed-index">OBJECT 01 / 03</p>
+      <h1 id="feed-name">Orbit</h1>
+      <p class="description" id="feed-description">A continuous knot, always in motion.</p>
+      <div class="feed-actions">
+        <button id="feed-color">Change color</button>
+        <button id="feed-animation">Play pulse</button>
+      </div>
+    </aside>
+    <nav class="feed-navigation" aria-label="Choose a scene">
+      <button data-feed-scene="0" aria-label="View Orbit" aria-current="true"><span>01</span></button>
+      <button data-feed-scene="1" aria-label="View Bloom" aria-current="false"><span>02</span></button>
+      <button data-feed-scene="2" aria-label="View Helix" aria-current="false"><span>03</span></button>
+    </nav>
+    <footer class="feed-footer">
+      <p>DRAG SIDEWAYS TO ROTATE <span>·</span> SCROLL TO CONTINUE ↓</p>
+      <span class="quality" id="feed-quality">PREPARING</span>
+    </footer>
+    <script type="module" src="/src/feed.ts"></script>
+  </body>
+</html>

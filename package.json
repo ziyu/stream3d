@@ -1,0 +1,37 @@
+{
+  "name": "stream3d-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/core",
+    "packages/compiler",
+    "packages/runtime",
+    "packages/vite"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false && tsc -p tsconfig.examples.json",
+    "test": "vitest run",
+    "test:browser": "playwright test",
+    "check": "npm run typecheck && npm test",
+    "predev": "npm run build && npm run fixtures",
+    "dev": "vite --config examples/playground/vite.config.ts",
+    "prebuild:demo": "npm run fixtures",
+    "build:demo": "npm run build && vite build --config examples/playground/vite.config.ts",
+    "preview": "vite preview --config examples/playground/vite.config.ts",
+    "fixtures": "node --import tsx scripts/generate-fixtures.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.0",
+    "@types/node": "^24.0.0",
+    "@types/three": "0.187.0",
+    "tsx": "^4.20.6",
+    "typescript": "5.9.3",
+    "vite": "8.3.7",
+    "vitest": "5.1.0"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

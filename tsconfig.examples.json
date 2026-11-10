@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "declaration": false,
+    "declarationMap": false
+  },
+  "include": ["examples/playground/**/*.ts", "scripts/**/*.ts", "playwright.config.ts", "tests/browser/**/*.ts"]
+}

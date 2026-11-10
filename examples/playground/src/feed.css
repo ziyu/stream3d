@@ -1,0 +1,51 @@
+@layer reset, layout, components;
+
+@layer reset {
+  * { box-sizing: border-box; }
+  :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #f0f5ee; background: #0b1519; scroll-snap-type: y mandatory; }
+  body { margin: 0; }
+  button, a { -webkit-tap-highlight-color: transparent; }
+  a { color: inherit; text-decoration: none; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  button:focus-visible, a:focus-visible { outline: 2px solid #b6edcc; outline-offset: 6px; }
+}
+
+@layer layout {
+  #feed-canvas { position: fixed; inset: 0; display: block; width: 100%; height: 100%; touch-action: pan-y; }
+  .feed-page { height: 100vh; height: 100svh; scroll-snap-align: start; pointer-events: none; }
+  .feed-header { position: fixed; top: 0; left: 0; width: 100%; display: flex; justify-content: space-between; align-items: center; padding: 30px 40px; z-index: 2; background: linear-gradient(#0b1519a8, transparent); }
+  .feed-caption { position: fixed; bottom: 105px; left: 7vw; max-width: min(560px, 80vw); z-index: 2; pointer-events: none; text-shadow: 0 2px 25px #0b1519; }
+  .feed-navigation { position: fixed; right: 34px; top: 50%; transform: translateY(-50%); display: grid; gap: 16px; z-index: 2; }
+  .feed-footer { position: fixed; bottom: 0; left: 0; width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 28px 40px; z-index: 2; pointer-events: none; background: linear-gradient(transparent, #0b1519c7); }
+  .feed-loading { position: fixed; top: 44%; left: 50%; transform: translate(-50%, -50%); z-index: 1; padding: 14px 20px; background: #101d21e8; border: 1px solid #395049; border-radius: 12px; color: #c4d2c9; text-align: center; }
+  .feed-loading[hidden] { display: none; }
+}
+
+@layer components {
+  .brand { font-size: 22px; font-weight: 650; letter-spacing: -1px; }
+  .brand > span { color: #b6edcc; }
+  .brand small { color: #7e9892; font-family: ui-monospace, monospace; font-size: 10px; letter-spacing: 2px; padding-left: 8px; }
+  .back-link { font-size: 12px; color: #b3c5bd; }
+  .eyebrow { color: #b6edcc; font-family: ui-monospace, monospace; font-size: 10px; letter-spacing: 2.5px; }
+  h1 { margin: 12px 0 10px; font-size: clamp(60px, 8vw, 100px); line-height: 1; font-weight: 520; letter-spacing: -5px; }
+  .description { margin: 0; color: #b5c7bf; font-size: 15px; line-height: 1.6; }
+  .feed-actions { display: flex; gap: 10px; margin-top: 24px; pointer-events: auto; }
+  .feed-actions button { padding: 11px 17px; background: #132823cc; border: 1px solid #506a5c; border-radius: 24px; font-size: 12px; }
+  .feed-actions button:hover { background: #264035; }
+  .feed-navigation button { width: 36px; height: 36px; border: 1px solid #5a7264; background: #0b151978; border-radius: 50%; font-size: 10px; font-family: ui-monospace, monospace; }
+  .feed-navigation button[aria-current="true"] { color: #102119; background: #b6edcc; border-color: #b6edcc; }
+  .feed-footer p { margin: 0; color: #90a69d; font: 9px ui-monospace, monospace; letter-spacing: 1.5px; line-height: 1.6; }
+  .feed-footer p span { margin: 0 12px; }
+  .quality { flex-shrink: 0; padding: 7px 10px; background: #152b23; border: 1px solid #3a5747; border-radius: 20px; color: #b6edcc; font: 9px ui-monospace, monospace; letter-spacing: 1.5px; }
+  @media (max-width: 600px) {
+    .feed-header { padding: 22px 22px; }
+    .feed-caption { left: 24px; bottom: 100px; }
+    .feed-navigation { right: 16px; top: 40%; gap: 12px; }
+    .feed-footer { padding: 22px 24px; align-items: end; }
+    .feed-footer p { max-width: 190px; font-size: 8px; }
+    .feed-footer p span { margin: 0 4px; }
+    h1 { font-size: 65px; letter-spacing: -3px; }
+    .description { max-width: 240px; font-size: 13px; }
+  }
+  @media (prefers-reduced-motion: reduce) { :root { scroll-behavior: auto; } }
+}
