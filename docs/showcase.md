@@ -30,12 +30,35 @@ npm run preview
 
 几何、纹理和动画由 `scripts/generate-showcase.ts` 与 `scripts/showcase/` 生成；雕塑来自 `scripts/generate-fixtures.ts`。仓库保留生成源码，不附带生成的 GLB 二进制，不下载第三方模型。`npm run fixtures` 可单独生成全部示例；生成器会复用未变化的输出。浏览器通过普通 `?asset` 管线加载编译后的独立档位。
 
-当前默认构建中，六套资产各计一次的产物如下；同一场景会重复使用其中多个资产。这些是文件体积与几何统计，不是耗时或帧率结果。
+## 示例的初始质量策略
+
+内容流在[示例 Vite 配置](../examples/playground/vite.config.ts)中覆盖编译档位，给首个表示设置更小的几何与纹理目标。下面是资产管线部分的配置；HTTP 实验室与页面入口仍由示例配置提供：
+
+```ts
+import { defineConfig } from 'vite';
+import { stream3d } from '@stream3d/vite';
+
+export default defineConfig({
+  plugins: [stream3d({ levels: [
+    { id: 'preview', ratio: 0.03, textureSize: 128, minScreenCoverage: 0 },
+    { id: 'standard', ratio: 0.25, textureSize: 512, minScreenCoverage: 0.25 },
+    { id: 'full', ratio: 1, textureSize: 1024, minScreenCoverage: 0.65 },
+  ] })],
+});
+```
+
+这项覆盖只属于示例。库默认仍为 preview `0.15 / 256`、standard `0.45 / 512`、full `1 / 1024`，分别表示三角形目标比例与纹理最长边上限；详见[资产管线](assets.md)。示例的最高档保持不变，Whole asset 比较仍使用相同的最高档 GLB。
+
+一页会重复放置多个实例。共享下载、几何和纹理可以避免重复传输与部分驻留开销，但这些实例仍需要绘制和各自的状态更新，因此初始预算也要考虑整页的绘制量。更小的 preview 旨在先提供轮廓，并降低首批传输、解码和上传工作；不能仅凭文件缩小比例推导首帧加速或帧率。
+
+`ratio` 是相对源几何的目标，不保证实际三角形数恰好等于该比例。拓扑、简化误差限制和小 primitive 保护都会影响结果；本示例的建筑与机械资产在 3% 目标下仍会保留更多几何。应结合实际产物和视觉质量评估策略，修改配置后重新构建并测量。
+
+当前**示例覆盖配置**构建中，六套资产各计一次的产物如下；同一场景会重复使用其中多个资产。这些是文件体积与几何统计，不是耗时或帧率结果。
 
 | 档位 | 六套 GLB 合计字节数 | 六套资产合计三角形数 |
 | --- | ---: | ---: |
-| preview | 1,848,860 | 100,889 |
-| standard | 4,563,032 | 299,643 |
+| preview | 651,380 | 24,150 |
+| standard | 2,971,380 | 167,151 |
 | full | 9,977,136 | 664,054 |
 
 六个源 GLB 共 49,943,740 字节，约 47.63 MiB；浏览器加载的是编译档位。源体积和最高档体积也不等于某一页实际收到的字节，后者受该页使用的资产、所经档位和缓存命中影响。

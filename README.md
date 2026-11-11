@@ -25,6 +25,10 @@ npm run dev
 
 示例的建筑、机械、植物、地形、珊瑚和灯具均由仓库源码生成，包含真实几何、纹理和动画。仓库不附带生成的模型二进制，也不下载第三方模型；首次启动会生成源 GLB 并编译三个质量档位。详见[内容流演示与测量指南](docs/showcase.md)。
 
+![Stream3D 的复杂内容流：建筑、植物、地形与实时资源诊断](docs/images/showcase.png)
+
+上图为真实 Chromium 运行截图，来自 [CI 879db2a](https://github.com/ziyu/stream3d/actions/runs/42961406917)，拍摄于首档体积进一步缩小之前。图中的时间和帧间隔属于该次软件渲染会话；当前配置和复现方法见[测量指南](docs/showcase.md)。
+
 ## 开发者体验
 
 Vite 插件负责把普通 glTF / GLB 转换成可渐进加载的资产：

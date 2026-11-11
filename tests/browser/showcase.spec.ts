@@ -1,4 +1,5 @@
 import { expect, test, type Page, type Request, type TestInfo } from '@playwright/test';
+import { writeFile } from 'node:fs/promises';
 import type { Mesh, MeshStandardMaterial } from 'three';
 import type { AssetManifest, ManagedModel, StreamApp } from 'stream3d';
 import type { FeedController } from '../../examples/playground/src/showcase/controller.js';
@@ -51,7 +52,9 @@ async function ready(page: Page, index: number, coarseOnly = false): Promise<voi
 }
 
 async function attachJson(testInfo: TestInfo, name: string, value: unknown): Promise<void> {
-  await testInfo.attach(name, { body: JSON.stringify(value, null, 2), contentType: 'application/json' });
+  const path = testInfo.outputPath(name);
+  await writeFile(path, JSON.stringify(value, null, 2), 'utf8');
+  await testInfo.attach(name, { path, contentType: 'application/json' });
 }
 
 async function screenshot(page: Page, testInfo: TestInfo, name: string): Promise<void> {
