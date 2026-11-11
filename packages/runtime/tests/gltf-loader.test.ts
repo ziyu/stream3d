@@ -68,6 +68,8 @@ it('decodes real Meshopt GLB bytes, animates clones, and reuses downloaded bytes
   // Meshopt quantization may add a child transform; the animated prefab node remains its parent.
   expect(mesh!.getWorldPosition(new Vector3()).x).toBeCloseTo(0.1);
   expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(app.diagnostics().network.requestsCompleted).toBe(1);
+  expect(app.diagnostics().network.bytesReceived).toBe(glb.byteLength);
 
   model.destroy();
   time = 11_000;
@@ -80,4 +82,17 @@ it('decodes real Meshopt GLB bytes, animates clones, and reuses downloaded bytes
   expect(fetchMock).toHaveBeenCalledTimes(1);
   expect(app.diagnostics().bytes.hits).toBeGreaterThanOrEqual(1);
   expect(app.diagnostics().resources.misses).toBe(2);
+  expect(app.diagnostics().network.requestsStarted).toBe(1);
+  expect(app.diagnostics().network.bytesReceived).toBe(glb.byteLength);
+
+  model.destroy();
+  const cleared = app.clearCache();
+  expect(cleared.representations.entries).toBe(1);
+  expect(cleared.bytes).toEqual({ entries: 1, bytes: glb.byteLength });
+  model = scene.addModel(asset);
+  await flush();
+  await model.ready();
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(app.diagnostics().network.requestsCompleted).toBe(2);
+  expect(app.diagnostics().network.bytesReceived).toBe(glb.byteLength * 2);
 });

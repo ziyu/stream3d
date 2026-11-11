@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b1114" />
+    <meta name="description" content="Stream3D: stable scene objects, progressive detail, and automatic resource ownership. An interactive framework playground." />
+    <title>Stream3D — Progressive by default</title>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="wordmark" href="./" aria-label="Stream3D home"><span class="brand-mark" aria-hidden="true">S</span>stream<span>3d</span></a>
+      <a class="build-label" href="./feed.html">OPEN THE SCROLL FEED ↗</a>
+      <a class="repo-link" href="https://github.com/ziyu/stream3d" target="_blank" rel="noreferrer">Source on GitHub <span aria-hidden="true">↗</span></a>
+    </header>
+    <main>
+      <section class="intro">
+        <div>
+          <p class="eyebrow"><span class="status-dot"></span> PROGRESSIVE BY DEFAULT</p>
+          <h1>Objects stay.<br /><span>Detail adapts.</span></h1>
+        </div>
+        <p class="intro-copy">Create a scene. Make it interactive.<br />Let the runtime handle the resources.</p>
+      </section>
+      <section class="workbench" aria-label="Interactive 3D playground">
+        <div class="stage-shell">
+          <div class="stage-topline"><span>LIVE SCENE</span><span id="asset-name">01 / ORBIT</span></div>
+          <div class="viewport" id="viewport">
+            <canvas id="scene-canvas" aria-label="Interactive sculpture. Drag to orbit, scroll to zoom, or use the distance slider below."></canvas>
+            <div class="loading-message" id="loading-message" role="status">Preparing the first representation…</div>
+            <div class="level-badge"><span class="status-dot"></span><span id="current-level">Waiting for first frame</span></div>
+            <p class="interaction-hint">DRAG TO ORBIT <span>·</span> SCROLL TO EXPLORE <span>·</span> CLICK THE OBJECT</p>
+          </div>
+          <div class="asset-picker" aria-label="Choose a scene">
+            <button class="asset-card selected" data-scene="0" aria-pressed="true"><span class="asset-swatch mint"></span><span><strong>Orbit</strong><small>A continuous knot</small></span><span class="card-index">01</span></button>
+            <button class="asset-card" data-scene="1" aria-pressed="false"><span class="asset-swatch amber"></span><span><strong>Bloom</strong><small>A sculpted surface</small></span><span class="card-index">02</span></button>
+            <button class="asset-card" data-scene="2" aria-pressed="false"><span class="asset-swatch violet"></span><span><strong>Helix</strong><small>An intricate loop</small></span><span class="card-index">03</span></button>
+          </div>
+        </div>
+        <aside class="inspector" aria-label="Runtime inspector">
+          <div class="inspector-heading"><h2>Runtime</h2><span class="live-label">LIVE</span></div>
+          <p class="inspector-note">Real resource accounting, updated as you explore.</p>
+          <dl class="metrics">
+            <div><dt>Resident estimate</dt><dd id="metric-memory">—</dd></div>
+            <div><dt>Shared resource hits</dt><dd id="metric-hits">—</dd></div>
+            <div><dt>Active instances</dt><dd id="metric-instances">—</dd></div>
+            <div><dt>Drawn triangles</dt><dd id="metric-triangles">—</dd></div>
+          </dl>
+          <p class="budget-note">Resident memory is an asset estimate, not a hardware GPU measurement.</p>
+          <div class="control-group">
+            <label for="distance">Camera distance <output id="distance-output">5.0</output></label>
+            <input type="range" id="distance" min="2.5" max="14" step="0.1" value="5" />
+            <p>Detail follows the projected screen size.</p>
+          </div>
+          <div class="control-group">
+            <label for="budget">Resident budget</label>
+            <select id="budget"><option value="2">2 MiB — constrained</option><option value="16" selected>16 MiB — balanced</option><option value="64">64 MiB — generous</option></select>
+            <p>Live resources stay valid as the quality target changes.</p>
+          </div>
+          <div class="actions">
+            <button id="add-instances" class="primary-button">Add five instances <span>+</span></button>
+            <div class="action-pair"><button id="recolor">Change color</button><button id="animate">Play pulse</button></div>
+            <button id="reset" class="quiet-button">Remove extra instances</button>
+          </div>
+          <details><summary>Resource details</summary><pre id="diagnostics" aria-label="Raw runtime diagnostics"></pre></details>
+        </aside>
+      </section>
+      <section class="under-the-hood">
+        <div><p class="eyebrow">THE DEVELOPER EXPERIENCE</p><h2>A scene API.<br />A streaming runtime.</h2><p>No manual LOD selection. No per-texture cleanup. Scene and object lifetimes own the resources.</p></div>
+        <pre class="code-example"><code><span class="code-muted">// Assets are processed by the build plugin.</span>
+<span class="code-purple">import</span> sculpture <span class="code-purple">from</span> <span class="code-green">"./orbit.glb?asset"</span>;
+
+<span class="code-purple">const</span> scene = app.createScene();
+<span class="code-purple">const</span> model = scene.addModel(sculpture);
+
+model.animation.play(<span class="code-green">"Idle"</span>);
+model.on(<span class="code-green">"click"</span>, () => {
+  model.animation.play(<span class="code-green">"Pulse"</span>);
+});
+
+app.present(scene);</code></pre>
+      </section>
+      <footer><span>Stream3D / Open source / MIT</span><span>Discrete geometry and texture levels · Three.js backend</span></footer>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -10,6 +10,7 @@ import {
 } from '@stream3d/core';
 import type { AssetInput, AssetLevel, AssetManifest } from '@stream3d/core';
 import type { ModelLoader, ModelTemplate, RuntimeBudgets } from './types.js';
+import { NetworkMonitor } from './network.js';
 
 export function abortError(message = 'Operation aborted'): Error {
   const error = new Error(message);
@@ -149,6 +150,7 @@ function acquireMeshoptWorkers(requested: number): () => void {
 
 export class AssetResources {
   readonly network = new TaskScheduler({ concurrency: 4 });
+  readonly networkMonitor = new NetworkMonitor();
   readonly decode: TaskScheduler;
   readonly bytes: ResourcePool<ArrayBuffer>;
   readonly representations: ResourcePool<ModelTemplate>;
@@ -182,11 +184,10 @@ export class AssetResources {
     const gltfLoader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
     this.loader = options.loader ?? (async ({ level, signal }) => {
       const lease = this.bytes.acquire(level.url, async byteSignal => {
-        const value = await this.network.schedule(async requestSignal => {
-          const response = await fetch(level.url, { signal: requestSignal });
-          if (!response.ok) throw new Error(`Failed to fetch ${level.url}: HTTP ${response.status}`);
-          return response.arrayBuffer();
-        }, { priority: 10, signal: byteSignal });
+        const value = await this.network.schedule(
+          requestSignal => this.networkMonitor.fetchBytes(level.url, requestSignal),
+          { priority: 10, signal: byteSignal },
+        );
         return { value, bytes: value.byteLength };
       }, { signal });
       try {
@@ -217,11 +218,11 @@ export class AssetResources {
     }
     const url = resolveAssetUrl(input, this.baseUrl);
     const lease = this.manifests.acquire(url, async manifestSignal => {
-      const text = await this.network.schedule(async requestSignal => {
-        const response = await fetch(url, { signal: requestSignal });
-        if (!response.ok) throw new Error(`Failed to fetch manifest ${url}: HTTP ${response.status}`);
-        return response.text();
-      }, { priority: 20, signal: manifestSignal });
+      const data = await this.network.schedule(
+        requestSignal => this.networkMonitor.fetchBytes(url, requestSignal),
+        { priority: 20, signal: manifestSignal },
+      );
+      const text = new TextDecoder().decode(data);
       const value = this.resolveUrls(validateManifest(JSON.parse(text) as unknown), url);
       return { value, bytes: text.length * 2 };
     }, { signal });
@@ -251,6 +252,14 @@ export class AssetResources {
     this.bytes.sweep();
     this.manifests.sweep();
     this.representations.sweep();
+  }
+
+  clearCache() {
+    return {
+      representations: this.representations.clearIdle(),
+      bytes: this.bytes.clearIdle(),
+      manifests: this.manifests.clearIdle(),
+    };
   }
 
   dispose(): void {

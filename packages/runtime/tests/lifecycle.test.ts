@@ -394,6 +394,166 @@ describe('managed model lifecycle', () => {
     expect(model.animation.time).toBeCloseTo(0.1);
   });
 
+  it('hands shared pending work to an initialized next scene and cancels obsolete work', async () => {
+    const shared = deferred<ModelTemplate>();
+    const signals = new Map<string, AbortSignal>();
+    const loader = vi.fn(async ({ manifest: asset, signal }) => {
+      signals.set(asset.id, signal);
+      if (asset.id === 'fixture-shared') return shared.promise;
+      return new Promise<ModelTemplate>((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    });
+    const { app, renderer } = setup({ loader });
+    const first = app.createScene();
+    const oldShared = first.addModel(manifest());
+    const obsoleteAsset = manifest();
+    obsoleteAsset.id = 'obsolete';
+    obsoleteAsset.levels = obsoleteAsset.levels.map(level => ({ ...level, url: `obsolete-${level.url}` }));
+    const oldObsolete = first.addModel(obsoleteAsset);
+    const next = app.createScene();
+    const newShared = next.addModel(manifest());
+    await flush(app);
+    expect(newShared.manifest).not.toBeNull();
+    app.present(first);
+    await flush(app);
+    expect(loader).toHaveBeenCalledTimes(2);
+    const oldSharedReady = expect(oldShared.ready()).rejects.toMatchObject({ name: 'AbortError' });
+    const oldObsoleteReady = expect(oldObsolete.ready()).rejects.toMatchObject({ name: 'AbortError' });
+
+    app.present(next);
+
+    expect(signals.get('fixture-shared')!.aborted).toBe(false);
+    expect(signals.get('obsolete')!.aborted).toBe(true);
+    expect(oldShared.visible).toBe(false);
+    expect(oldObsolete.visible).toBe(false);
+    expect(newShared.visible).toBe(true);
+    expect(app.diagnostics().activeModels).toBe(1);
+    expect(app.diagnostics().resources.activeLeases).toBe(1);
+    expect(renderer.render).toHaveBeenLastCalledWith(next.root, next.camera);
+    await Promise.all([oldSharedReady, oldObsoleteReady]);
+
+    shared.resolve(template());
+    await flush(app);
+    await newShared.ready();
+    expect(loader).toHaveBeenCalledTimes(2);
+    expect(newShared.currentLevel).toBe(0);
+    expect(oldShared.object3D.children).toHaveLength(0);
+    expect(oldObsolete.object3D.children).toHaveLength(0);
+  });
+
+  it('does not retain old pending work speculatively when the next manifest is unresolved', async () => {
+    const signals: AbortSignal[] = [];
+    const results: ReturnType<typeof deferred<ModelTemplate>>[] = [];
+    const loader = vi.fn(async ({ signal }) => {
+      const result = deferred<ModelTemplate>();
+      results.push(result);
+      signals.push(signal);
+      signal.addEventListener('abort', () => result.reject(signal.reason), { once: true });
+      return result.promise;
+    });
+    const { app } = setup({ loader });
+    const first = app.createScene();
+    const old = first.addModel(manifest());
+    app.present(first);
+    await flush(app);
+    const oldReady = expect(old.ready()).rejects.toMatchObject({ name: 'AbortError' });
+    const next = app.createScene();
+    const incoming = next.addModel(manifest());
+    expect(incoming.manifest).toBeNull();
+
+    app.present(next);
+
+    expect(signals[0]!.aborted).toBe(true);
+    expect(app.diagnostics().resources.activeLeases).toBe(0);
+    await oldReady;
+    await flush(app);
+    expect(loader).toHaveBeenCalledTimes(2);
+    results[1]!.resolve(template());
+    await flush(app);
+    await incoming.ready();
+    expect(incoming.currentLevel).toBe(0);
+    expect(old.object3D.children).toHaveLength(0);
+  });
+
+  it('resolves shared texture subscribers without spending additional physical upload slots', async () => {
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(0);
+    const sources = [template(), template(), template()];
+    for (const source of sources) {
+      (source.scene.children[0] as Mesh<BoxGeometry, MeshStandardMaterial>).material.map = new Texture();
+    }
+    try {
+      const renderer = { ...backend(), initTexture: vi.fn() };
+      const { app } = setup({ renderer });
+      const scene = app.createScene();
+      const controllers = Array.from({ length: 6 }, () => new AbortController());
+      const preparations = controllers.map((controller, index) => app.prepare(
+        sources[index < 4 ? 0 : index - 3]!.scene, scene, controller.signal,
+      ));
+      const aborted = expect(preparations[3]!).rejects.toMatchObject({ name: 'AbortError' });
+      controllers[3]!.abort();
+      expect(app.diagnostics().pendingUploads).toBe(5);
+
+      app.tick(0);
+
+      expect(renderer.initTexture).toHaveBeenCalledTimes(2);
+      expect(app.diagnostics().pendingUploads).toBe(1);
+      await Promise.all([...preparations.slice(0, 3), preparations[4], aborted]);
+      app.tick(0);
+      await preparations[5];
+      expect(renderer.initTexture).toHaveBeenCalledTimes(3);
+      expect(app.diagnostics().pendingUploads).toBe(0);
+    } finally {
+      clock.mockRestore();
+      for (const source of sources) disposeTemplate(source);
+    }
+  });
+
+  it('clearCache removes idle templates while protecting the currently rendered lease', async () => {
+    const { app } = setup();
+    const first = app.createScene();
+    const firstModel = first.addModel(manifest());
+    const second = app.createScene();
+    const other = manifest();
+    other.id = 'other-asset';
+    other.levels = other.levels.map(level => ({ ...level, url: `other-${level.url}` }));
+    const secondModel = second.addModel(other);
+    app.present(first);
+    await flush(app);
+    app.present(second);
+    await flush(app);
+    expect(app.diagnostics().resources.entries).toBe(2);
+    const cleared = app.clearCache();
+    expect(cleared.representations).toEqual({ entries: 1, bytes: 100 });
+    expect(app.diagnostics().resources.entries).toBe(1);
+    expect(app.diagnostics().resources.activeLeases).toBe(1);
+    expect(secondModel.currentLevel).toBe(0);
+    expect(secondModel.object3D.children).toHaveLength(1);
+    expect(firstModel.currentLevel).toBe(null);
+    expect(app.clearCache().representations).toEqual({ entries: 0, bytes: 0 });
+  });
+
+  it('measures coarse preparation elapsed time without including later refinement', async () => {
+    const loaded = deferred<ModelTemplate>();
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(10);
+    try {
+      const { app } = setup({ loader: async () => loaded.promise });
+      const scene = app.createScene();
+      const model = scene.addModel(manifest());
+      app.present(scene);
+      await flush(app);
+      expect(model.timing).toEqual({ firstReadyMs: null, lastReadyMs: null });
+      clock.mockReturnValue(85);
+      loaded.resolve(template());
+      await flush(app);
+      expect(model.timing).toEqual({ firstReadyMs: 75, lastReadyMs: 75 });
+      expect(app.diagnostics().levels[0]!.timing.firstReadyMs).toBe(75);
+      const snapshot = model.timing;
+      snapshot.firstReadyMs = 1;
+      expect(model.timing.firstReadyMs).toBe(75);
+    } finally { clock.mockRestore(); }
+  });
+
   it('resolves fetched manifest asset URLs against the manifest location', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(manifest())));
     vi.stubGlobal('fetch', fetchMock);
@@ -406,6 +566,55 @@ describe('managed model lifecycle', () => {
     await model.ready();
     expect(urls).toEqual(['https://assets.example.test/robot/preview.glb']);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts real UTF-8 manifest bytes once for shared loads, and clearCache resets idle manifest caching', async () => {
+    const asset = manifest();
+    asset.name = '角色 🐉';
+    const json = JSON.stringify(asset);
+    const length = new TextEncoder().encode(json).byteLength;
+    const fetchMock = vi.fn(async () => new Response(json));
+    vi.stubGlobal('fetch', fetchMock);
+    const { app } = setup();
+    const scene = app.createScene();
+    const url = 'https://assets.example.test/robot/manifest.json';
+    scene.addModel(url);
+    scene.addModel(url);
+    await flush(app, 40);
+    expect(app.diagnostics().network).toEqual({
+      requestsStarted: 1, requestsCompleted: 1, requestsAborted: 0, requestsFailed: 0,
+      requestsActive: 0, bytesReceived: length, bytesCompleted: length,
+    });
+    expect(length).toBeGreaterThan(json.length);
+    expect(app.clearCache().manifests.entries).toBe(1);
+    scene.addModel(url);
+    await flush(app, 40);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(app.diagnostics().network.bytesReceived).toBe(length * 2);
+  });
+
+  it('aborts a partial GLB response when the app is destroyed and retains accurate partial-byte totals', async () => {
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({ start(controller) { stream = controller; }, cancel });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body)));
+    const { app } = setup({ loader: undefined });
+    const scene = app.createScene();
+    const model = scene.addModel(manifest());
+    const rejection = expect(model.ready()).rejects.toMatchObject({ name: 'AbortError' });
+    app.present(scene);
+    stream.enqueue(new Uint8Array(11));
+    await flush(app, 40);
+    expect(app.diagnostics().network.bytesReceived).toBe(11);
+    expect(app.diagnostics().network.requestsActive).toBe(1);
+    app.destroy();
+    await rejection;
+    await flush(app, 40);
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(app.diagnostics().network).toEqual({
+      requestsStarted: 1, requestsCompleted: 0, requestsAborted: 1, requestsFailed: 0,
+      requestsActive: 0, bytesReceived: 11, bytesCompleted: 0,
+    });
   });
 
   it('rejects malformed manifests rather than mounting an invalid model', async () => {

@@ -19,10 +19,11 @@ npm run dev
 
 打开终端给出的地址，默认是 `http://127.0.0.1:5173`。
 
-- **Playground `/`**：调整相机距离和资源预算、添加共享实例、修改材质、播放动画，查看真实资源诊断。
-- **Scroll feed `/feed.html`**：纵向滚动或滑动切换 3D 内容，横向拖动旋转，使用一个 canvas 和同一个资源管理器。当前场景退出后，不再继续为它提升清晰度。
+- **内容流 `/` 或 `/feed.html`**：30 个组合场景，每页 18–24 个对象，来自 6 套共享资产。纵向滑动浏览、横向拖动旋转，查看渐进质量、请求取消、缓存复用和驻留预算，并运行受控加载比较。
+- **API 调试台 `/inspector.html`**：调整相机距离和预算、添加共享实例、修改材质、播放动画，查看原始诊断。
+- **最小内容流 `/minimal.html`**：保留原来的三个雕塑场景，方便阅读最小接入代码。
 
-示例模型由仓库内的脚本生成，包含纹理和动画，不需要下载第三方模型。首次启动会生成源 GLB 并编译三个质量档位。
+示例的建筑、机械、植物、地形、珊瑚和灯具均由仓库源码生成，包含真实几何、纹理和动画。仓库不附带生成的模型二进制，也不下载第三方模型；首次启动会生成源 GLB 并编译三个质量档位。详见[内容流演示与测量指南](docs/showcase.md)。
 
 ## 开发者体验
 
@@ -129,19 +130,15 @@ console.log(app.diagnostics());
 | 生命周期 | 独立消费者引用；最后消费者退出后取消；过期结果清理；场景/应用销毁 |
 | 浏览器调度 | 独立网络/解码队列、Meshopt workers、shader 预热、分帧纹理上传 |
 | 开发接入 | Vite `?asset`、热重载依赖追踪、CLI、可静态部署的产物 |
-| 诊断 | 活跃实例、缓存命中、队列、当前/待加载档位、错误和估计内存 |
+| 诊断 | 活跃实例、缓存命中、队列、质量档位、错误、实际响应体字节、请求状态、准备耗时和估计内存 |
 
-### 真实资产示例
+### 内容流与受控比较
 
-仓库生成的 Orbit 源模型约 2.45 MiB，包含 40,960 个三角形、1024 纹理和两个动画。默认编译结果如下；这些是产物大小，不是首帧耗时或帧率基准。
+内容流使用一个 canvas，最多保留当前页及相邻两页的逻辑场景，只激活当前场景。相同资产在多个对象和页面间共享表示；切换时仍被下一页需要的请求会继续，其他过期工作会被撤销。逻辑场景窗口和资产缓存分别管理，离开一页不等于立即删除所有可复用数据。
 
-| 档位 | GLB 字节数 | 三角形数 | 纹理最长边上限 |
-| --- | ---: | ---: | ---: |
-| preview | 95,388 | 6,144 | 256 |
-| standard | 255,324 | 18,432 | 512 |
-| full | 599,000 | 40,960 | 1024 |
+本地 `dev` / `preview` 服务提供真实的 HTTP 响应体限速：同一会话的所有 GLB 请求共享 8 Mbps 或 1.6 Mbps 的速率预算，并分别加入 80 ms 或 180 ms 的响应等待。比较工具以相同场景、相机和最高档 GLB，对比渐进加载与直接加载最高档；每次使用新 runtime 和独立的 `no-store` 资产 URL。结果由当前运行测得，可下载 JSON。
 
-每个档位都是完整可渲染的独立 GLB。逐档浏览会传输多个档位；它不等同于只发送新增顶点的连续 refinement 流。
+面板区分实测响应体字节、主线程 RAF 间隔和估计驻留内存。帧间隔 p95 取最近最多 180 个样本；首次有用画面定义为地形与主体准备好后再经过两个 RAF 回调。每个档位都是独立 GLB，渐进模式可能传输更多总字节。比较不包含引擎首次下载，也不代表固定帧率或通用加速比例；完整条件与缓存边界见[测量指南](docs/showcase.md)。
 
 ## CLI 与静态部署
 
@@ -166,20 +163,23 @@ const model = scene.addModel('/assets/model/asset-<hash>.stream3d.json');
 | `packages/compiler` | `@stream3d/compiler`：离线编译和 `stream3d compile` CLI |
 | `packages/runtime` | `stream3d`：场景、模型、Three.js 后端和自动资源策略 |
 | `packages/vite` | `@stream3d/vite`：资产导入、开发服务、生产构建 |
-| `examples/playground` | 交互调试台与纵向 3D feed |
-| `scripts/generate-fixtures.ts` | 生成原创、带纹理和动画的演示资产 |
+| `examples/playground` | 30 场景内容流、HTTP 实验室、API 调试台与最小 feed |
+| `scripts/generate-showcase.ts`、`scripts/showcase` | 生成六套原创建筑、机械与自然资产 |
+| `scripts/generate-fixtures.ts` | 生成调试台和最小 feed 使用的雕塑资产 |
 
 ## 验证与构建
 
 ```bash
 npm run check        # 库和示例类型检查 + 单元/集成测试
-npm run build:demo   # 生成资产，编译库，构建两个可静态托管的示例页面
+npm run build:demo   # 生成资产，编译库，构建四个示例入口
 npx playwright install chromium
 npm run test:browser # 对 production build 运行真实浏览器回归
-npm run preview     # 预览 dist/playground
+npm run preview     # 在 http://127.0.0.1:4173 预览 dist/playground，含 HTTP 实验室
 ```
 
-单元/集成测试覆盖资源所有权、取消和晚到结果、缓存恢复、真实 glTF 编解码、动画/蒙皮/morph 保持，以及 Vite 的子路径、CDN 和相对 base。Playwright 覆盖渐进加载、状态保持、共享实例、快速切换、预算降档、销毁和纵向 feed。CI 使用一项 Linux / Node.js 24 任务运行上述验证。
+单元/集成测试覆盖资源所有权、取消和晚到结果、缓存恢复、真实 glTF 编解码、动画/蒙皮/morph 保持，以及 Vite 的子路径、CDN 和相对 base。浏览器回归用例包括渐进加载、状态保持、共享实例、快速切换、预算降档、销毁和内容流。CI 配置为使用 Linux / Node.js 24 运行上述验证；实际通过情况以运行结果为准。
+
+`dist/playground` 可以静态部署。普通静态托管不包含本地 HTTP 实验室，页面会使用直接交付模式并关闭受控比较；3D 内容流和运行时资源策略仍可使用。
 
 ## 当前边界
 
@@ -192,7 +192,7 @@ npm run preview     # 预览 dist/playground
 - 自动管理仅覆盖 `scene.addModel()` 创建的托管资源。通过 `scene.root` 添加的自定义 Three.js 资源由调用方负责释放。
 - 首版以 WebGL2 为目标；物理、音频、React 组件、WebGPU 后端、通用材质编辑器和跨 app 的全局 GPU 缓存未包含在内。
 
-更详细的设计与配置见 [架构](docs/architecture.md)、[资产管线](docs/assets.md) 和 [API](docs/api.md)。
+更详细的说明见[内容流演示与测量](docs/showcase.md)、[架构](docs/architecture.md)、[资产管线](docs/assets.md) 和 [API](docs/api.md)。
 
 ## License
 

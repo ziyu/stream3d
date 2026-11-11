@@ -39,7 +39,7 @@ async function continueUnlessCancelled(route: Route): Promise<void> {
 }
 
 async function openDemo(page: Page): Promise<void> {
-  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await page.goto('/inspector.html', { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => Boolean(window.__stream3d));
 }
 
@@ -235,7 +235,7 @@ test('native scrolling switches the single-canvas feed to Helix and restores Orb
   await page.setViewportSize({ width: 390, height: 844 });
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
-  await page.goto('/feed.html', { waitUntil: 'domcontentloaded' });
+  await page.goto('/minimal.html', { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => Boolean(window.__stream3dFeed));
   await expect(page.locator('#feed-name')).toHaveText('Orbit');
   await expect.poll(() => page.evaluate(() => window.__stream3dFeed.models[0]!.currentLevel)).not.toBeNull();

@@ -148,10 +148,8 @@ export class StreamApp {
     if (this.disposed) throw new Error('App was destroyed');
     if (scene.app !== this || scene.destroyed) throw new Error('Cannot present this scene');
     if (this.activeScene === scene) return;
-    if (this.activeScene) {
-      if (this.controls) this.activeScene.controlsTarget.copy(this.controls.target);
-      for (const model of this.activeScene.models) model.setDemand(false, false, 0, 0, this.now());
-    }
+    const previous = this.activeScene;
+    if (previous && this.controls) previous.controlsTarget.copy(this.controls.target);
     this.controls?.dispose();
     this.controls = undefined;
     this.activeScene = scene;
@@ -163,7 +161,7 @@ export class StreamApp {
       this.controls.update();
     }
     // Demand is updated immediately; activation never waits for the entire asset.
-    this.tick(0);
+    this.updateFrame(0, previous);
   }
 
   /** Change memory policy; existing visible objects automatically select cheaper representations. */
@@ -182,8 +180,17 @@ export class StreamApp {
     this.tick(0);
   }
 
+  /** Drop idle runtime caches only. Active leases and browser/CDN caches are unaffected. */
+  clearCache() {
+    return this.resources.clearCache();
+  }
+
   /** Optional manual driver for tests/host engines. autoStart:false disables the owned RAF loop. */
   tick(deltaSeconds = 0): void {
+    this.updateFrame(deltaSeconds);
+  }
+
+  private updateFrame(deltaSeconds: number, previousScene: ManagedScene | null = null): void {
     if (this.disposed) return;
     this.resize();
     const now = this.now();
@@ -192,14 +199,22 @@ export class StreamApp {
       this.lastSweep = now;
     }
     const scene = this.activeScene;
-    if (scene) {
-      this.controls?.update();
-      for (const model of scene.models) model.advance(Math.max(0, Math.min(deltaSeconds, 0.1)));
-      scene.root.updateMatrixWorld(true);
-      scene.camera.updateMatrixWorld(true);
-      this.projection.multiplyMatrices(scene.camera.projectionMatrix, scene.camera.matrixWorldInverse);
-      this.frustum.setFromProjectionMatrix(this.projection);
-      this.plan(scene, now);
+    try {
+      if (scene) {
+        this.controls?.update();
+        for (const model of scene.models) model.advance(Math.max(0, Math.min(deltaSeconds, 0.1)));
+        scene.root.updateMatrixWorld(true);
+        scene.camera.updateMatrixWorld(true);
+        this.projection.multiplyMatrices(scene.camera.projectionMatrix, scene.camera.matrixWorldInverse);
+        this.frustum.setFromProjectionMatrix(this.projection);
+        this.plan(scene, now);
+      }
+    } finally {
+      // Acquire known next-scene demand first, so shared pending work never loses its final
+      // lease during a handoff. Unrelated old demand still cancels synchronously before render.
+      if (previousScene) {
+        for (const model of previousScene.models) model.setDemand(false, false, 0, 0, now);
+      }
     }
     if (!this.contextLost) {
       this.flushUploads();
@@ -277,13 +292,22 @@ export class StreamApp {
   private flushUploads(): void {
     // Individual uploads are not preemptible. Bound count and retain frame time between assets.
     const start = performance.now();
-    for (let count = 0; count < 2 && this.uploads.length; count++) {
-      if (count > 0 && performance.now() - start >= 2) break;
-      const job = this.uploads.shift()!;
+    let count = 0;
+    let processed = false;
+    while (this.uploads.length) {
+      if (processed && performance.now() - start >= 2) break;
+      const job = this.uploads[0]!;
+      // Shared instances may have queued this texture before its first upload completed.
+      // Resolving those subscribers is cheap and must not consume the physical upload quota.
+      const initialized = this.initializedTextures.has(job.texture);
+      if (!job.signal.aborted && !initialized && count >= 2) break;
+      this.uploads.shift();
+      processed = true;
       job.signal.removeEventListener('abort', job.onAbort);
       if (job.signal.aborted) { job.reject(job.signal.reason ?? abortError()); continue; }
       try {
-        if (!this.initializedTextures.has(job.texture)) {
+        if (!initialized) {
+          count++;
           this.renderer.initTexture?.(job.texture);
           this.initializedTextures.add(job.texture);
         }
@@ -302,6 +326,7 @@ export class StreamApp {
       activeModels: models.filter(model => model.visible).length,
       resources,
       bytes: this.resources.bytes.stats,
+      network: this.resources.networkMonitor.stats,
       scheduler: { network: this.resources.network.stats, decode: this.resources.decode.stats },
       estimatedGpuBytes: resources.bytes,
       budgetGpuBytes: this.budgets.gpuBytes,
@@ -321,6 +346,7 @@ export class StreamApp {
         visible: model.visible,
         coverage: model.coverage,
         error: model.error?.message ?? null,
+        timing: model.timing,
       })),
     };
   }

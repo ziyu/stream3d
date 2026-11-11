@@ -37,6 +37,11 @@ export interface ResourcePoolStats {
   evictions: number;
 }
 
+export interface ResourceClearResult {
+  entries: number;
+  bytes: number;
+}
+
 interface Subscriber<T> {
   released: boolean;
   settled: boolean;
@@ -150,6 +155,20 @@ export class ResourcePool<T> {
       if (this.#bytes <= this.#maxBytes) break;
       this.#remove(entry, true);
     }
+  }
+
+  /** Remove only unused completed values, without changing the budget or live ownership. */
+  clearIdle(): ResourceClearResult {
+    const cleared: ResourceClearResult = { entries: 0, bytes: 0 };
+    if (this.#disposed) return cleared;
+    // Snapshot the candidates so disposal hooks cannot extend this sweep indefinitely.
+    for (const entry of [...this.#entries.values()]) {
+      if (entry.state !== 'ready' || entry.subscribers.size !== 0) continue;
+      cleared.entries++;
+      cleared.bytes += entry.bytes;
+      this.#remove(entry, true);
+    }
+    return cleared;
   }
 
   setBudget(bytes: number): void {

@@ -226,4 +226,34 @@ describe('ResourcePool', () => {
     expect(onDisposeError).toHaveBeenCalledExactlyOnceWith(failure);
     expect(pool.stats).toMatchObject({ bytes: 0, entries: 0, activeLeases: 0 });
   });
+
+  it('clears only idle completed entries while protecting active and loading consumers', async () => {
+    const dispose = vi.fn();
+    const pending = deferred<ResourcePayload<string>>();
+    let pendingSignal!: AbortSignal;
+    const pool = new ResourcePool<string>({ dispose, maxBytes: 100, idleMs: Infinity });
+    const idle = pool.acquire('idle', async () => ({ value: 'idle', bytes: 5 }));
+    const active = pool.acquire('active', async () => ({ value: 'active', bytes: 7 }));
+    const loading = pool.acquire('loading', signal => { pendingSignal = signal; return pending.promise; });
+    await Promise.all([idle.value, active.value]);
+    idle.release();
+
+    expect(pool.clearIdle()).toEqual({ entries: 1, bytes: 5 });
+    expect(dispose).toHaveBeenCalledExactlyOnceWith('idle');
+    expect(pendingSignal.aborted).toBe(false);
+    expect(pool.stats).toMatchObject({ entries: 2, loading: 1, activeLeases: 2, bytes: 7, evictions: 1 });
+    expect(pool.clearIdle()).toEqual({ entries: 0, bytes: 0 });
+
+    pending.resolve({ value: 'loaded', bytes: 3 });
+    expect(await loading.value).toBe('loaded');
+    active.release();
+    expect(pool.clearIdle()).toEqual({ entries: 1, bytes: 7 });
+    expect(pool.stats).toMatchObject({ entries: 1, loading: 0, activeLeases: 1, bytes: 3, evictions: 2 });
+    loading.release();
+    expect(pool.clearIdle()).toEqual({ entries: 1, bytes: 3 });
+    expect(pool.stats).toMatchObject({ entries: 0, bytes: 0, evictions: 3 });
+    pool.dispose();
+    expect(pool.clearIdle()).toEqual({ entries: 0, bytes: 0 });
+    expect(dispose.mock.calls.map(([value]) => value)).toEqual(['idle', 'active', 'loaded']);
+  });
 });

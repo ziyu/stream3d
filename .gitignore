@@ -8,3 +8,4 @@ playwright-report/
 .DS_Store
 *.tgz
 examples/playground/assets/*.glb
+examples/playground/assets/showcase/

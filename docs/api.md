@@ -29,6 +29,7 @@ const scene = app.createScene();
 app.present(scene);
 app.setBudgets({ gpuBytes: 32 * 1024 ** 2, cacheBytes: 48 * 1024 ** 2 });
 const snapshot = app.diagnostics();
+const cleared = app.clearCache();
 app.destroy();
 ```
 
@@ -39,6 +40,22 @@ app.destroy();
 - `tick(deltaSeconds = 0)` 执行一帧调度、动画和渲染。动画步长限制为 `0…0.1` 秒，避免恢复页面后的超大跳跃。自动 RAF 模式无需额外调用。
 - `destroy()` 幂等，停止 RAF、清理监听器，销毁所有 managed scenes、资源池和渲染器。已销毁 app 无法重新创建或呈现场景。
 
+### 清理闲置缓存
+
+`app.clearCache()` 只移除没有消费者持有租约的缓存条目，返回本次实际移除的数量与池内记账字节数：
+
+```ts
+{
+  representations: { entries, bytes },
+  bytes: { entries, bytes },
+  manifests: { entries, bytes }
+}
+```
+
+三个字段分别对应已解析表示、原始 GLB 字节和已解析 manifest。当前正在渲染、正在加载或仍被准备作业使用的资源受租约保护；这个方法不会强行销毁它们，也不改变预算和空闲过期策略。重复调用且没有新闲置条目时返回零，手动清理会计入相应池的 `evictions`。
+
+此方法不重置命中次数和网络累计计数。它也不清理浏览器 HTTP 缓存、Service Worker、CDN、编解码器或着色器的热状态。现存模型仍持有自己的已解析 manifest；清理 manifest 池不会使这些模型忘记元数据。因此，不能把调用一次 `clearCache()` 描述成完整的首次访问或全链路冷启动。资源与浏览器缓存的比较方法见 [架构文档](architecture.md#冷缓存比较的边界)。
+
 ### Diagnostics
 
 ```ts
@@ -47,14 +64,45 @@ app.destroy();
   estimatedGpuBytes, budgetGpuBytes, gpuPressure,
   resources: { entries, loading, activeLeases, bytes, hits, misses, evictions },
   bytes: { entries, loading, activeLeases, bytes, hits, misses, evictions },
+  network: {
+    requestsStarted, requestsCompleted, requestsAborted, requestsFailed,
+    requestsActive, bytesReceived, bytesCompleted
+  },
   scheduler: { network: { queued, running }, decode: { queued, running } },
   pendingUploads,
   render: { calls, triangles, geometries, textures },
-  levels: [{ id, name, level, pending, visible, coverage, error }]
+  levels: [{
+    id, name, level, pending, visible, coverage, error,
+    timing: { firstReadyMs, lastReadyMs }
+  }]
 }
 ```
 
 `resources` 是解码模板池，`bytes` 是网络字节缓存。`estimatedGpuBytes` 包含模板池仍缓存的闲置表示，不仅是当前 draw call 使用的表示；它不表示真实硬件显存。`hits` 包括缓存复用与同一个进行中请求的复用。`render` 数据来自后端。
+
+### 网络计数的定义
+
+`network` 是 app 生命周期内的累计计数，针对运行时执行的 manifest 下载及默认 GLB 加载路径中的 `fetch()`。它与 `scheduler.network` 不同：后者描述排队和运行中的调度任务，不表示已经发出了多少次请求。
+
+| 字段 | 精确定义 |
+| --- | --- |
+| `requestsStarted` | 实际调用 `fetch()` 的次数；不包含排队时已取消的任务或运行时缓存命中。 |
+| `requestsCompleted` | HTTP 成功且响应体已完整读取的请求数。之后的 manifest 校验、GLB 解析失败不改变这一网络结果。 |
+| `requestsAborted` | 已开始后被取消的请求数，可能已经收到部分响应体。 |
+| `requestsFailed` | HTTP 状态失败、传输失败或响应体读取失败的请求数。 |
+| `requestsActive` | 已开始但尚未记录终态的请求数。 |
+| `bytesReceived` | 读取器实际收到的 `Response.body` 字节数，包含取消或失败前已收到的部分。 |
+| `bytesCompleted` | 完整成功请求的响应体字节之和。 |
+
+字节计数不依赖 manifest 里的 `byteLength` 或 HTTP `Content-Length`。它衡量浏览器交付的响应体 payload，**不是真实线路流量**：HTTP 压缩、响应头、重传不在该数值内；浏览器 HTTP 缓存或 Service Worker 交付的响应体仍会被计入。命中运行时 GLB 字节池时，不执行 fetch，也不会增加这些计数。注入的 `ModelLoader` 如果自行发请求，这些外部请求不会自动纳入监控。
+
+读取器按块增加 `bytesReceived`，所以尚未完成的下载也可观察。请求终态在实际结束时记录，调用 `destroy()` 后仍在完成取消清理的请求可能短暂保留在 `requestsActive` 中。正常快照满足：
+
+```ts
+requestsStarted === requestsCompleted + requestsAborted + requestsFailed + requestsActive
+```
+
+计数只使用固定数量的累计字段，不保存不断增长的请求历史。比较两次操作时，记录起止快照并取差值，不要把 app 的累计值当作单次展示的成本。
 
 ## `ManagedScene`
 
@@ -140,6 +188,21 @@ unsubscribe();
 `ready('interactive')` 在当前实例已有可交互表示时完成，不等待最高档。未呈现的场景不会因为调用 `ready()` 自动激活。首次加载失败时会拒绝；已活动场景退出或模型销毁时也会拒绝尚未完成的等待。
 
 更高档加载失败时保留当前可用表示，并发出 `error` 事件，不会因此让画面消失。调用 `retry()` 清除失败标记，由下一帧重新尝试；没有无限自动重试循环。
+
+### 准备时间
+
+```ts
+const { firstReadyMs, lastReadyMs } = model.timing;
+```
+
+这两个字段使用 `performance.now()` 实际测量，从没有当前表示时发起粗档请求开始，到实例完成准备并挂载为止；包括该次请求的资源池等待、下载、解码及 GPU 准备。计时不包括先前的 manifest 获取、未激活等待，也不保证浏览器已呈现下一帧。
+
+- `firstReadyMs`：此逻辑模型第一次成功准备粗档的耗时，之后保持不变。
+- `lastReadyMs`：最近一次成功准备粗档的耗时，包含离屏或场景恢复时从缓存重新实例化的过程。
+
+首次成功前为 `null`，失败和取消不写入一个虚构的完成时间。高清升级不会更新这些值；新的粗档请求仍在等待时，已有成功值会保留。因此，`lastReadyMs` 非空不能证明本次呈现已完成，仍应使用 `ready('interactive')` 或当前生命周期状态。诊断中的 `levels[].timing` 与该属性一致，均返回快照。
+
+`now` 注入用于调度和缓存时钟，不替代这里的实际性能计时。多模型场景应由应用明确哪些模型是首屏必要内容，再测量它们在本次呈现中的整体就绪时间；单个对象的计时不能代表整个场景。
 
 ### 生命周期
 

@@ -6,7 +6,7 @@ import type {
 } from 'three';
 import type { AssetInput, AssetManifest } from '@stream3d/core';
 import type { StreamApp, ManagedScene } from './app.js';
-import type { AnimationOptions, MaterialOverride, ModelTemplate } from './types.js';
+import type { AnimationOptions, MaterialOverride, ModelTemplate, ModelTiming } from './types.js';
 import { abortError, disposeInstance, instanceAnimations, instantiateTemplate, isAbort } from './resources.js';
 
 interface Payload {
@@ -67,6 +67,7 @@ export class ManagedModel {
   private readonly worldBounds = new Box3();
   private readonly sphere = new Sphere();
   private readonly viewPosition = new Vector3();
+  private readonly measuredTiming: ModelTiming = { firstReadyMs: null, lastReadyMs: null };
 
   constructor(readonly scene: ManagedScene, private readonly input: AssetInput) {
     const self = this;
@@ -104,6 +105,8 @@ export class ManagedModel {
   get rotation(): Euler { return this.object3D.rotation; }
   get scale(): Vector3 { return this.object3D.scale; }
   get app(): StreamApp { return this.scene.app; }
+  /** Timings stop at prepared attachment; they do not claim a frame has been displayed. */
+  get timing(): ModelTiming { return { ...this.measuredTiming }; }
 
   private async initialize(): Promise<void> {
     try {
@@ -205,6 +208,8 @@ export class ManagedModel {
     const manifest = this.manifest;
     const level = manifest?.levels[index];
     if (!manifest || !level) return;
+    const firstRepresentation = this.currentLevel === null;
+    const startedAt = performance.now();
     const controller = new AbortController();
     this.pending = controller;
     this.pendingLevel = index;
@@ -243,6 +248,11 @@ export class ManagedModel {
       this.currentLevel = index;
       this.bindAnimation();
       installed = true;
+      if (firstRepresentation) {
+        const elapsed = Math.max(0, performance.now() - startedAt);
+        this.measuredTiming.lastReadyMs = elapsed;
+        this.measuredTiming.firstReadyMs ??= elapsed;
+      }
       if (previous) {
         disposeInstance(previous.object);
         previous.release();

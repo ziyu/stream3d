@@ -20,7 +20,7 @@
     "prebuild:demo": "npm run fixtures",
     "build:demo": "npm run build && vite build --config examples/playground/vite.config.ts",
     "preview": "vite preview --config examples/playground/vite.config.ts",
-    "fixtures": "node --import tsx scripts/generate-fixtures.ts"
+    "fixtures": "node --import tsx scripts/generate-fixtures.ts && node --import tsx scripts/generate-showcase.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.65.0",
