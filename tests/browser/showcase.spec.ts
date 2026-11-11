@@ -1,71 +1,11 @@
-import { expect, test, type Page, type Request, type TestInfo } from '@playwright/test';
-import { writeFile } from 'node:fs/promises';
+import { expect, test } from '@playwright/test';
 import type { Mesh, MeshStandardMaterial } from 'three';
-import type { AssetManifest, ManagedModel, StreamApp } from 'stream3d';
-import type { FeedController } from '../../examples/playground/src/showcase/controller.js';
-import type { BenchmarkReport } from '../../examples/playground/src/showcase/benchmark.js';
-import type { Kit, Story } from '../../examples/playground/src/showcase/catalog.js';
+import type { ManagedModel } from 'stream3d';
+import { attachJson, isGlb, openShowcase, ready, screenshot } from './showcase-helpers.js';
 
-interface ShowcaseHooks {
-  app: StreamApp;
-  controller: FeedController;
-  activeIndex: number;
-  controlled: boolean;
-  lastBenchmark: BenchmarkReport | null;
-  stories: Story[];
-  assets: Record<Kit, AssetManifest>;
-  goTo(index: number, smooth?: boolean): void;
-  snapshot(): ReturnType<FeedController['snapshot']>;
-  compare(): Promise<BenchmarkReport | null>;
-}
-
-declare global {
-  interface Window {
-    __stream3dShowcase: ShowcaseHooks;
-    __showcaseDeparted?: ManagedModel[];
-  }
-}
-
-// CI retains the actual navigation and rendering, in addition to screenshots and
-// measured JSON. No test treats this software-rendered browser as a device benchmark.
+// Record interactive browsing evidence. The comparison has a separate spec so its
+// worker-level recording options can be disabled without affecting these tests.
 test.use({ video: 'on' });
-
-async function openShowcase(page: Page, query = 'profile=native&mode=progressive'): Promise<void> {
-  await page.goto(`/?${query}`, { waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => Boolean(window.__stream3dShowcase));
-  expect(await page.evaluate(() => window.__stream3dShowcase.controlled)).toBe(true);
-}
-
-async function ready(page: Page, index: number, coarseOnly = false): Promise<void> {
-  await expect.poll(() => page.evaluate(({ index, coarseOnly }) => {
-    const hook = window.__stream3dShowcase;
-    const active = hook.controller.active;
-    const snapshot = hook.snapshot();
-    return hook.activeIndex === index && snapshot.readyObjects === snapshot.objectCount
-      && snapshot.objectCount >= 18 && snapshot.visit?.firstUsefulMs !== null
-      && Boolean(active?.actors.every(actor => actor.model.currentLevel !== null
-        && actor.model.pendingLevel === null && (!coarseOnly || actor.model.currentLevel === 0)))
-      && snapshot.runtime.scheduler.network.running === 0 && snapshot.runtime.scheduler.network.queued === 0
-      && snapshot.runtime.scheduler.decode.running === 0 && snapshot.runtime.scheduler.decode.queued === 0
-      && snapshot.runtime.pendingUploads === 0;
-  }, { index, coarseOnly }), { timeout: 75_000 }).toBe(true);
-}
-
-async function attachJson(testInfo: TestInfo, name: string, value: unknown): Promise<void> {
-  const path = testInfo.outputPath(name);
-  await writeFile(path, JSON.stringify(value, null, 2), 'utf8');
-  await testInfo.attach(name, { path, contentType: 'application/json' });
-}
-
-async function screenshot(page: Page, testInfo: TestInfo, name: string): Promise<void> {
-  const path = testInfo.outputPath(name);
-  await page.screenshot({ path });
-  await testInfo.attach(name, { path, contentType: 'image/png' });
-}
-
-function isGlb(request: Request): boolean {
-  return new URL(request.url()).pathname.endsWith('.glb');
-}
 
 test('renders a complex shared-asset world with many managed objects and real triangles', async ({ page }, testInfo) => {
   test.setTimeout(150_000);
@@ -274,92 +214,4 @@ test('bounds scene ownership across 30 rapid skips, cancels work and evicts only
   for (const model of release.departed) expect(model).toEqual({ level: null, pending: null, children: 0, visible: false });
   expect(errors).toEqual([]);
   await attachJson(testInfo, 'rapid-browse-measured.json', { tour, before, release });
-});
-
-test.describe('isolated comparison', () => {
-  // Recording would add observer work to the very frame timings being measured.
-  test.use({ video: 'off', trace: 'off' });
-
-  test('compares two cold runtimes against the exact same highest GLBs and measured HTTP bytes', async ({ page }, testInfo) => {
-    test.setTimeout(180_000);
-    interface ObservedResponse { url: string; canonical: string; session: string; bytes: number; cacheControl: string; profile: string; status: number; timing: ReturnType<Request['timing']> }
-    type CompletedRequest = Omit<ObservedResponse, 'bytes' | 'cacheControl' | 'status'> & { request: Request };
-    const completed: CompletedRequest[] = [];
-    const observed: ObservedResponse[] = [];
-    const errors: string[] = [];
-    const bodyErrors: string[] = [];
-    const started: string[] = [];
-    page.on('pageerror', error => errors.push(error.message));
-    page.on('request', request => {
-      const url = new URL(request.url());
-      if (isGlb(request) && url.searchParams.get('labSession')?.startsWith('trial-')) started.push(request.url());
-    });
-    page.on('requestfinished', request => {
-      const url = new URL(request.url());
-      const session = url.searchParams.get('labSession') ?? '';
-      if (!isGlb(request) || !session.startsWith('trial-')) return;
-      const canonical = new URL(url);
-      canonical.searchParams.delete('labProfile');
-      canonical.searchParams.delete('labSession');
-      // These metadata reads are local to Playwright. Do not extract response bodies
-      // through CDP while either measured trial is still running.
-      completed.push({ request, url: url.href, canonical: canonical.href, session, profile: url.searchParams.get('labProfile') ?? '', timing: request.timing() });
-    });
-    await openShowcase(page, 'profile=fast&mode=progressive');
-    await ready(page, 0);
-    const report = await page.evaluate(() => window.__stream3dShowcase.compare());
-    expect(report, await page.locator('#comparison-progress').textContent() ?? 'Comparison failed').not.toBeNull();
-    const result = report!;
-    await expect.poll(() => completed.length).toBe(result.trials.reduce((sum, trial) => sum + trial.network.requestsCompleted, 0));
-    const bodyReads = await Promise.allSettled(completed.map(async ({ request, ...metadata }): Promise<ObservedResponse> => {
-      const response = (await request.response())!;
-      const body = await response.body();
-      return { ...metadata, bytes: body.length, cacheControl: response.headers()['cache-control'] ?? '', status: response.status() };
-    }));
-    for (const read of bodyReads) {
-      if (read.status === 'fulfilled') observed.push(read.value);
-      else bodyErrors.push(read.reason instanceof Error ? read.reason.message : String(read.reason));
-    }
-    result.notes.push('This CI comparison disables Playwright video and tracing. Request metadata is observed during the run; CDP response-body extraction and the result screenshot occur only after both timed trials finish.');
-    expect(result.schema).toBe('stream3d-benchmark/1');
-    expect(result.trials).toHaveLength(2);
-    expect(result.profile).toEqual({ id: 'fast', bytesPerSecond: 1_000_000, latencyMs: 80 });
-    expect(result.conditions.width).toBeGreaterThan(0);
-    expect(result.conditions.height).toBeGreaterThan(0);
-    expect(result.conditions.animations).toBe('stopped');
-    const progressive = result.trials.find(trial => trial.mode === 'progressive')!;
-    const whole = result.trials.find(trial => trial.mode === 'whole')!;
-    expect(progressive.highestAssetUrls).toEqual(whole.highestAssetUrls);
-    expect(progressive.highestAssetPayloadBytes).toBe(whole.highestAssetPayloadBytes);
-    expect(whole.highestAssetUrls).toHaveLength(result.scene.uniqueAssets);
-
-    const sessions = new Set<string>();
-    for (const trial of result.trials) {
-      const responses = observed.filter(response => response.session.startsWith(`trial-${trial.mode}-`));
-      const ownSessions = new Set(responses.map(response => response.session));
-      expect(ownSessions.size).toBe(1);
-      sessions.add([...ownSessions][0]!);
-      expect(responses.every(response => response.status === 200 && response.profile === 'fast' && response.cacheControl.includes('no-store'))).toBe(true);
-      const highest = responses.filter(response => trial.highestAssetUrls.includes(response.canonical));
-      expect(highest.map(response => response.canonical).sort()).toEqual(trial.highestAssetUrls);
-      expect(highest.reduce((sum, response) => sum + response.bytes, 0)).toBe(trial.highestAssetPayloadBytes);
-      expect(responses.reduce((sum, response) => sum + response.bytes, 0)).toBe(trial.network.bytesCompleted);
-      expect(trial.network.requestsCompleted).toBe(responses.length);
-      expect(trial.network.bytesReceived).toBeGreaterThanOrEqual(trial.network.bytesCompleted);
-      expect(trial.network.requestsActive).toBe(0);
-      for (const measurement of [trial.firstUsefulMs, trial.allObjectsMs, trial.highestDetailMs]) {
-        expect(Number.isFinite(measurement)).toBe(true);
-        expect(measurement).toBeGreaterThan(0);
-      }
-    }
-    expect(sessions.size).toBe(2);
-    expect(whole.network.bytesReceived).toBe(whole.highestAssetPayloadBytes);
-    expect(whole.network.requestsStarted).toBe(whole.highestAssetUrls.length);
-    expect(new Set(started).size).toBe(started.length);
-    expect(bodyErrors).toEqual([]);
-    expect(errors).toEqual([]);
-    await attachJson(testInfo, 'comparison-measured.json', result);
-    await attachJson(testInfo, 'comparison-observed-http.json', observed);
-    await screenshot(page, testInfo, 'comparison-results.png');
-  });
 });
