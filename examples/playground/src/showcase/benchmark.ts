@@ -11,6 +11,25 @@ export interface TrialViewport {
   pixelRatio: number;
   devicePixelRatio: number;
 }
+export interface TrialResourceTiming {
+  url: string;
+  startMs: number;
+  fetchStartMs: number;
+  responseStartMs: number | null;
+  responseEndMs: number | null;
+  encodedBodySize: number;
+  decodedBodySize: number;
+}
+export interface TrialLongTask {
+  startMs: number;
+  durationMs: number;
+}
+export interface TrialObservation<T> {
+  supported: boolean;
+  limit: number;
+  dropped: number;
+  entries: T[];
+}
 export interface TrialResult {
   mode: LoadingMode;
   firstUsefulMs: number;
@@ -25,6 +44,19 @@ export interface TrialResult {
   highestAssetPayloadBytes: number;
   highestAssetPayloadSource: 'manifest-byteLength';
   viewport: TrialViewport;
+  /** Elapsed endpoints from the same trial start; prepared endpoints precede their RAF waits. */
+  phases: {
+    appCreatedMs: number;
+    sceneCreationStartedMs: number;
+    sceneCreatedMs: number;
+    presentReturnedMs: number;
+    firstRafMs: number;
+    usefulPreparedMs: number;
+    allObjectsPreparedMs: number;
+    highestPreparedMs: number;
+  };
+  resourceTiming: TrialObservation<TrialResourceTiming>;
+  longTasks: TrialObservation<TrialLongTask>;
 }
 export interface BenchmarkReport {
   schema: 'stream3d-benchmark/1';
@@ -69,6 +101,9 @@ export async function runComparison(options: {
       'bytesReceived counts Response.body payload, including partial transfers, not HTTP wire bytes. Bandwidth is shared per trial session.',
       'Resident peak is the largest framework estimate sampled on RAF callbacks and completion, not an exact hardware high-water mark. RAF intervals are main-thread scheduling measurements, not a hardware FPS guarantee.',
       'Frame statistics contain at most the last 180 visible-page RAF intervals at trial completion; they are a trailing window, not the full trial distribution.',
+      'phases contains elapsed endpoints from trial start. usefulPreparedMs and allObjectsPreparedMs are recorded before the two RAF waits; scene creation spans sceneCreationStartedMs to sceneCreatedMs.',
+      'Resource Timing records up to 128 completed entries for this trial session. Times are offsets from trial start; body sizes are browser timing data, separate from the runtime reader counters. Unsupported observers return supported:false and an empty list.',
+      'Long Task observation records up to 64 tasks overlapping this trial. A negative startMs means the task began before the trial, so its full duration can include preceding work. These observations do not by themselves identify GPU or transport causes.',
       'Progressive loading may transfer more total bytes because it also downloads intermediate levels.',
       'highestAssetPayloadBytes comes from compiled manifest byteLength values and verifies equivalent target assets; actual received bytes are reported separately in network.',
       'This is one sequential pair with randomized order, not a statistical performance distribution. Viewport size, device pixel ratio and page visibility must remain unchanged.',
@@ -103,10 +138,13 @@ async function runTrial(options: {
 }): Promise<TrialResult> {
   const started = performance.now();
   const app = makeApp(options.canvas, 512);
+  const appCreatedMs = performance.now() - started;
   const lifetime = new AbortController();
   let frame = 0;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let observer: ResizeObserver | undefined;
+  let resourceObserver: PerformanceObserver | undefined;
+  let longTaskObserver: PerformanceObserver | undefined;
   let rejectInterruption!: (reason: unknown) => void;
   const interrupted = new Promise<never>((_, reject) => { rejectInterruption = reject; });
   // Setup errors can occur before the race is attached. Keep interruption rejection observed.
@@ -138,8 +176,56 @@ async function runTrial(options: {
     timeout = setTimeout(() => interrupt(new Error('Comparison exceeded 120 seconds. Choose a faster profile or a smaller scene.')), 120_000);
 
     const session = `trial-${options.mode}-${crypto.randomUUID()}`;
+    const resourceTiming: TrialObservation<TrialResourceTiming> = { supported: false, limit: 128, dropped: 0, entries: [] };
+    const longTasks: TrialObservation<TrialLongTask> = { supported: false, limit: 64, dropped: 0, entries: [] };
+    const collectResources = (entries: PerformanceEntry[]) => {
+      for (const entry of entries) {
+        if (entry.entryType !== 'resource') continue;
+        let url: URL;
+        try { url = new URL(entry.name, document.baseURI); }
+        catch { continue; }
+        if (url.searchParams.get('labSession') !== session) continue;
+        if (resourceTiming.entries.length >= resourceTiming.limit) { resourceTiming.dropped++; continue; }
+        const timing = entry as PerformanceResourceTiming;
+        resourceTiming.entries.push({
+          url: timing.name,
+          startMs: timing.startTime - started,
+          fetchStartMs: timing.fetchStart - started,
+          responseStartMs: timing.responseStart > 0 ? timing.responseStart - started : null,
+          responseEndMs: timing.responseEnd > 0 ? timing.responseEnd - started : null,
+          encodedBodySize: timing.encodedBodySize,
+          decodedBodySize: timing.decodedBodySize,
+        });
+      }
+    };
+    const collectLongTasks = (entries: PerformanceEntry[]) => {
+      for (const entry of entries) {
+        if (entry.entryType !== 'longtask' || entry.startTime + entry.duration <= started) continue;
+        if (longTasks.entries.length >= longTasks.limit) { longTasks.dropped++; continue; }
+        longTasks.entries.push({ startMs: entry.startTime - started, durationMs: entry.duration });
+      }
+    };
+    if (typeof PerformanceObserver !== 'undefined') {
+      // Unsupported types can be silently ignored by observe(), so test the advertised list.
+      if (PerformanceObserver.supportedEntryTypes?.includes('resource')) {
+        try {
+          resourceObserver = new PerformanceObserver(list => collectResources(list.getEntries()));
+          resourceObserver.observe({ type: 'resource', buffered: true });
+          resourceTiming.supported = true;
+        } catch { resourceObserver?.disconnect(); resourceObserver = undefined; }
+      }
+      if (PerformanceObserver.supportedEntryTypes?.includes('longtask')) {
+        try {
+          longTaskObserver = new PerformanceObserver(list => collectLongTasks(list.getEntries()));
+          longTaskObserver.observe({ type: 'longtask', buffered: true });
+          longTasks.supported = true;
+        } catch { longTaskObserver?.disconnect(); longTaskObserver = undefined; }
+      }
+    }
+    const sceneCreationStartedMs = performance.now() - started;
     const assetSet = createAssetSet({ mode: options.mode, profile: options.profile, session, controlled: true, forceHighest: true });
     const bundle = buildScene(app, options.story, assetSet);
+    const sceneCreatedMs = performance.now() - started;
     for (const actor of bundle.actors) actor.model.animation.stop();
     updateCamera(bundle, options.viewport.width / options.viewport.height, true);
     const frames = new FrameHistory();
@@ -148,18 +234,25 @@ async function runTrial(options: {
     let bytesAtFirstUseful = 0;
     let allObjectsMs: number | null = null;
     let highestDetailMs: number | null = null;
+    let firstRafMs: number | null = null;
+    let usefulPreparedMs: number | null = null;
+    let allObjectsPreparedMs: number | null = null;
+    let highestPreparedMs: number | null = null;
     let lastUpdate = 0;
     let highestObserved = false;
     let settleHighest!: () => void;
     const highestPrepared = new Promise<void>(resolve => { settleHighest = resolve; });
     app.present(bundle.scene);
+    const presentReturnedMs = performance.now() - started;
 
     const useful = Promise.all(bundle.essential.map(model => model.ready())).then(async () => {
+      usefulPreparedMs = performance.now() - started;
       await twoAnimationFrames(lifetime.signal);
       firstUsefulMs = performance.now() - started;
       bytesAtFirstUseful = app.diagnostics().network.bytesReceived;
     });
     const allObjects = Promise.all(bundle.actors.map(actor => actor.model.ready())).then(async () => {
+      allObjectsPreparedMs = performance.now() - started;
       await twoAnimationFrames(lifetime.signal);
       allObjectsMs = performance.now() - started;
     });
@@ -174,6 +267,7 @@ async function runTrial(options: {
       try {
         lifetime.signal.throwIfAborted();
         checkConditions();
+        firstRafMs ??= performance.now() - started;
         frames.sample(timestamp);
         const diagnostics = app.diagnostics();
         peak = Math.max(peak, diagnostics.estimatedGpuBytes);
@@ -189,6 +283,7 @@ async function runTrial(options: {
           return model.manifest && model.currentLevel === model.manifest.levels.length - 1 && model.pendingLevel === null;
         })) {
           highestObserved = true;
+          highestPreparedMs = performance.now() - started;
           settleHighest();
         }
         // Keep the trailing frame window current through all endpoint RAF waits.
@@ -204,6 +299,8 @@ async function runTrial(options: {
     peak = Math.max(peak, snapshot.estimatedGpuBytes);
     const highest = [...new Set(options.story.actors.map(actor => actor.kit))].map(kit => assets[kit].levels.at(-1)!);
     const uniqueHighest = new Map(highest.map(level => [new URL(level.url, document.baseURI).href, level.byteLength]));
+    if (resourceObserver) collectResources(resourceObserver.takeRecords());
+    if (longTaskObserver) collectLongTasks(longTaskObserver.takeRecords());
     const result: TrialResult = {
       mode: options.mode,
       firstUsefulMs: firstUsefulMs!, allObjectsMs: allObjectsMs!, highestDetailMs: highestDetailMs!,
@@ -212,6 +309,13 @@ async function runTrial(options: {
       highestAssetUrls: [...uniqueHighest.keys()].sort(),
       highestAssetPayloadBytes: [...uniqueHighest.values()].reduce((sum, bytes) => sum + bytes, 0),
       highestAssetPayloadSource: 'manifest-byteLength', viewport: { ...options.viewport },
+      phases: {
+        appCreatedMs, sceneCreationStartedMs, sceneCreatedMs, presentReturnedMs,
+        firstRafMs: firstRafMs!, usefulPreparedMs: usefulPreparedMs!,
+        allObjectsPreparedMs: allObjectsPreparedMs!, highestPreparedMs: highestPreparedMs!,
+      },
+      resourceTiming: { ...resourceTiming, entries: [...resourceTiming.entries].sort((a, b) => a.startMs - b.startMs) },
+      longTasks: { ...longTasks, entries: [...longTasks.entries].sort((a, b) => a.startMs - b.startMs) },
     };
     options.onProgress({ mode: options.mode, phase: 'complete', elapsedMs: result.highestDetailMs, ready: bundle.actors.length, total: bundle.actors.length, bytesReceived: result.network.bytesReceived });
     return result;
@@ -220,6 +324,8 @@ async function runTrial(options: {
     cancelAnimationFrame(frame);
     if (timeout !== undefined) clearTimeout(timeout);
     observer?.disconnect();
+    resourceObserver?.disconnect();
+    longTaskObserver?.disconnect();
     options.signal.removeEventListener('abort', onAbort);
     document.removeEventListener('visibilitychange', onEnvironmentChange);
     window.removeEventListener('resize', onEnvironmentChange);

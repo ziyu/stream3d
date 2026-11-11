@@ -3,6 +3,7 @@ import type { Story } from '../examples/playground/src/showcase/catalog.js';
 
 const fixture = vi.hoisted(() => ({
   apps: [] as { destroy: ReturnType<typeof vi.fn> }[],
+  sessions: [] as string[],
   failBuild: false,
 }));
 
@@ -33,7 +34,7 @@ vi.mock('../examples/playground/src/showcase/controller.js', () => ({
 }));
 
 vi.mock('../examples/playground/src/showcase/scenes.js', () => ({
-  createAssetSet: (policy: unknown) => policy,
+  createAssetSet: (policy: { session: string }) => { fixture.sessions.push(policy.session); return policy; },
   updateCamera: vi.fn(),
   buildScene: (_app: unknown, _story: unknown, policy: { mode: string }) => {
     if (fixture.failBuild) throw new Error('Scene setup failed');
@@ -87,6 +88,7 @@ function run() {
 
 beforeEach(() => {
   fixture.apps = [];
+  fixture.sessions = [];
   fixture.failBuild = false;
   clock = 0;
   rafId = 0;
@@ -101,6 +103,7 @@ beforeEach(() => {
   vi.stubGlobal('window', new EventTarget());
   vi.stubGlobal('devicePixelRatio', 1);
   vi.stubGlobal('ResizeObserver', undefined);
+  vi.stubGlobal('PerformanceObserver', undefined);
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
     const id = ++rafId;
     rafs.set(id, callback);
@@ -143,10 +146,64 @@ describe('showcase comparison lifecycle', () => {
       // The highest condition is first observed at 16 ms, followed by two 16 ms frames.
       expect(trial.highestDetailMs).toBe(48);
       expect(trial.frameIntervals.samples).toBe(3);
+      expect(trial.phases).toEqual({
+        appCreatedMs: 0, sceneCreationStartedMs: 0, sceneCreatedMs: 0, presentReturnedMs: 0,
+        firstRafMs: 16, usefulPreparedMs: 0, allObjectsPreparedMs: 0, highestPreparedMs: 16,
+      });
+      expect(trial.resourceTiming).toEqual({ supported: false, limit: 128, dropped: 0, entries: [] });
+      expect(trial.longTasks).toEqual({ supported: false, limit: 64, dropped: 0, entries: [] });
     }
     expect(report.trials[0]!.viewport).toEqual(report.trials[1]!.viewport);
     expect(fixture.apps.every(app => app.destroy.mock.calls.length === 1)).toBe(true);
     expect(rafs.size).toBe(0);
+  });
+
+  it('bounds observer records, filters trial sessions and drains pending records at completion', async () => {
+    class FakePerformanceObserver {
+      static supportedEntryTypes = ['resource', 'longtask'];
+      static instances: FakePerformanceObserver[] = [];
+      type = '';
+      records: PerformanceEntry[] = [];
+      disconnect = vi.fn();
+      constructor(_callback: PerformanceObserverCallback) { FakePerformanceObserver.instances.push(this); }
+      observe(options: PerformanceObserverInit) { this.type = options.type ?? ''; }
+      takeRecords() { return this.records.splice(0); }
+    }
+    vi.stubGlobal('PerformanceObserver', FakePerformanceObserver);
+    const { result } = run();
+    await flush();
+    await frame();
+    const resource = (session: string, startTime: number, index = 0) => ({
+      name: `https://example.test/asset-${index}.glb?labSession=${session}`,
+      entryType: 'resource', startTime, duration: 3,
+      fetchStart: startTime, responseStart: startTime + 1, responseEnd: startTime + 3,
+      encodedBodySize: 10, decodedBodySize: 12,
+    }) as PerformanceResourceTiming;
+    const firstSession = fixture.sessions[0]!;
+    FakePerformanceObserver.instances[0]!.records = [
+      resource('another-trial', 1),
+      ...Array.from({ length: 129 }, (_, index) => resource(firstSession, 10 + index / 1000, index)),
+    ];
+    FakePerformanceObserver.instances[1]!.records = [
+      { entryType: 'longtask', startTime: -60, duration: 50 } as PerformanceEntry,
+      ...Array.from({ length: 65 }, () => ({ entryType: 'longtask', startTime: -50, duration: 55 }) as PerformanceEntry),
+    ];
+    await frame();
+    await frame(); // Second trial starts at 48 ms.
+    FakePerformanceObserver.instances[2]!.records = [resource(fixture.sessions[1]!, 50)];
+    for (let index = 0; index < 3; index++) await frame();
+    const report = await result;
+
+    expect(report.trials[0]!.resourceTiming.entries).toHaveLength(128);
+    expect(report.trials[0]!.resourceTiming.dropped).toBe(1);
+    expect(report.trials[0]!.resourceTiming.entries.every(entry => entry.url.includes(firstSession))).toBe(true);
+    expect(report.trials[0]!.longTasks.entries).toHaveLength(64);
+    expect(report.trials[0]!.longTasks.dropped).toBe(1);
+    expect(report.trials[0]!.longTasks.entries[0]).toEqual({ startMs: -50, durationMs: 55 });
+    expect(report.trials[1]!.resourceTiming).toMatchObject({ supported: true, dropped: 0, entries: [{
+      startMs: 2, fetchStartMs: 2, responseStartMs: 3, responseEndMs: 5, encodedBodySize: 10, decodedBodySize: 12,
+    }] });
+    expect(FakePerformanceObserver.instances.every(observer => observer.disconnect.mock.calls.length === 1)).toBe(true);
   });
 
   it('rejects an initially hidden page before creating any app', async () => {

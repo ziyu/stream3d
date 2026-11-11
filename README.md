@@ -27,7 +27,7 @@ npm run dev
 
 ![Stream3D 的复杂内容流：建筑、植物、地形与实时资源诊断](docs/images/showcase.png)
 
-上图为真实 Chromium 运行截图，来自 [CI 879db2a](https://github.com/ziyu/stream3d/actions/runs/42961406917)，拍摄于首档体积进一步缩小之前。图中的时间和帧间隔属于该次软件渲染会话；当前配置和复现方法见[测量指南](docs/showcase.md)。
+上图为真实 Chromium 运行截图，来自 [CI 0b82e68](https://github.com/ziyu/stream3d/actions/runs/42962335343)。图中的时间和帧间隔属于该次软件渲染会话；当前配置和复现方法见[测量指南](docs/showcase.md)。
 
 ## 开发者体验
 
