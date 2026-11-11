@@ -2,7 +2,8 @@ import { assets, type Story } from './catalog.js';
 import { FrameHistory, makeApp } from './controller.js';
 import { NETWORK_PROFILES, type NetworkProfileId } from './network-profiles.js';
 import { buildScene, createAssetSet, updateCamera, type LoadingMode } from './scenes.js';
-import type { StreamApp } from 'stream3d';
+import { WebGLRenderer } from 'three';
+import type { RendererBackend, StreamApp } from 'stream3d';
 
 type Network = ReturnType<StreamApp['diagnostics']>['network'];
 export interface TrialViewport {
@@ -29,6 +30,21 @@ export interface TrialObservation<T> {
   limit: number;
   dropped: number;
   entries: T[];
+}
+export interface TrialCallTiming {
+  count: number;
+  totalMs: number;
+  maxMs: number;
+  maxStartMs: number | null;
+}
+type RendererCallName = 'render' | 'compileAsyncCall' | 'compileAsyncWait' | 'initTexture';
+export interface TrialRendererTiming extends Record<RendererCallName, TrialCallTiming> {
+  slowCalls: {
+    thresholdMs: number;
+    limit: number;
+    dropped: number;
+    entries: { name: RendererCallName; startMs: number; durationMs: number }[];
+  };
 }
 export interface TrialResult {
   mode: LoadingMode;
@@ -57,6 +73,7 @@ export interface TrialResult {
   };
   resourceTiming: TrialObservation<TrialResourceTiming>;
   longTasks: TrialObservation<TrialLongTask>;
+  rendererTiming: TrialRendererTiming;
 }
 export interface BenchmarkReport {
   schema: 'stream3d-benchmark/1';
@@ -104,6 +121,8 @@ export async function runComparison(options: {
       'phases contains elapsed endpoints from trial start. usefulPreparedMs and allObjectsPreparedMs are recorded before the two RAF waits; scene creation spans sceneCreationStartedMs to sceneCreatedMs.',
       'Resource Timing records up to 128 completed entries for this trial session. Times are offsets from trial start; body sizes are browser timing data, separate from the runtime reader counters. Unsupported observers return supported:false and an empty list.',
       'Long Task observation records up to 64 tasks overlapping this trial. A negative startMs means the task began before the trial, so its full duration can include preceding work. These observations do not by themselves identify GPU or transport causes.',
+      'rendererTiming measures render/initTexture calls, compileAsync synchronous invocation, and wall time from invocation return to promise settlement. It is not GPU execution timing. Async waits can overlap, including instances waiting for the same program; totalMs values must not be summed as a breakdown of trial elapsed time. At most 32 calls lasting at least 50 ms are retained alongside aggregate count/total/max values.',
+      'Each demo canvas is permanently discarded after its trial. Its owned WebGL context is explicitly released after app.destroy(); loaded code and driver caches can still remain warm.',
       'Progressive loading may transfer more total bytes because it also downloads intermediate levels.',
       'highestAssetPayloadBytes comes from compiled manifest byteLength values and verifies equivalent target assets; actual received bytes are reported separately in network.',
       'This is one sequential pair with randomized order, not a statistical performance distribution. Viewport size, device pixel ratio and page visibility must remain unchanged.',
@@ -145,6 +164,7 @@ async function runTrial(options: {
   let observer: ResizeObserver | undefined;
   let resourceObserver: PerformanceObserver | undefined;
   let longTaskObserver: PerformanceObserver | undefined;
+  let rendererProbe: ReturnType<typeof instrumentRenderer> | undefined;
   let rejectInterruption!: (reason: unknown) => void;
   const interrupted = new Promise<never>((_, reject) => { rejectInterruption = reject; });
   // Setup errors can occur before the race is attached. Keep interruption rejection observed.
@@ -166,6 +186,7 @@ async function runTrial(options: {
   try {
     options.signal.throwIfAborted();
     checkConditions();
+    rendererProbe = instrumentRenderer(app.renderer, started);
     options.signal.addEventListener('abort', onAbort, { once: true });
     document.addEventListener('visibilitychange', onEnvironmentChange);
     window.addEventListener('resize', onEnvironmentChange);
@@ -316,6 +337,7 @@ async function runTrial(options: {
       },
       resourceTiming: { ...resourceTiming, entries: [...resourceTiming.entries].sort((a, b) => a.startMs - b.startMs) },
       longTasks: { ...longTasks, entries: [...longTasks.entries].sort((a, b) => a.startMs - b.startMs) },
+      rendererTiming: rendererProbe.snapshot(),
     };
     options.onProgress({ mode: options.mode, phase: 'complete', elapsedMs: result.highestDetailMs, ready: bundle.actors.length, total: bundle.actors.length, bytesReceived: result.network.bytesReceived });
     return result;
@@ -329,8 +351,83 @@ async function runTrial(options: {
     options.signal.removeEventListener('abort', onAbort);
     document.removeEventListener('visibilitychange', onEnvironmentChange);
     window.removeEventListener('resize', onEnvironmentChange);
-    app.destroy();
+    rendererProbe?.restore();
+    try { app.destroy(); }
+    finally {
+      // This demo always replaces the canvas. Core StreamApp teardown remains renderer-agnostic.
+      if (app.renderer instanceof WebGLRenderer) app.renderer.forceContextLoss();
+    }
   }
+}
+
+/** Example-only observation; wrappers keep the renderer receiver and original return values. */
+export function instrumentRenderer(renderer: RendererBackend, trialStarted: number) {
+  const empty = (): TrialCallTiming => ({ count: 0, totalMs: 0, maxMs: 0, maxStartMs: null });
+  const timings: TrialRendererTiming = {
+    render: empty(), compileAsyncCall: empty(), compileAsyncWait: empty(), initTexture: empty(),
+    slowCalls: { thresholdMs: 50, limit: 32, dropped: 0, entries: [] },
+  };
+  const restorers: (() => void)[] = [];
+  let restored = false;
+  const record = (name: RendererCallName, start: number, end: number) => {
+    const durationMs = Math.max(0, end - start);
+    const stats = timings[name];
+    stats.count++;
+    stats.totalMs += durationMs;
+    if (stats.maxStartMs === null || durationMs > stats.maxMs) {
+      stats.maxMs = durationMs;
+      stats.maxStartMs = start - trialStarted;
+    }
+    if (durationMs >= timings.slowCalls.thresholdMs) {
+      if (timings.slowCalls.entries.length < timings.slowCalls.limit) {
+        timings.slowCalls.entries.push({ name, startMs: start - trialStarted, durationMs });
+      } else timings.slowCalls.dropped++;
+    }
+  };
+  const render = renderer.render;
+  renderer.render = function (this: RendererBackend, ...args) {
+    const start = performance.now();
+    try { return render.apply(this, args); }
+    finally { record('render', start, performance.now()); }
+  };
+  restorers.push(() => { renderer.render = render; });
+  const compileAsync = renderer.compileAsync;
+  if (compileAsync) {
+    renderer.compileAsync = function (this: RendererBackend, ...args) {
+      const start = performance.now();
+      let result: ReturnType<typeof compileAsync>;
+      try { result = compileAsync.apply(this, args); }
+      finally { record('compileAsyncCall', start, performance.now()); }
+      const returnedAt = performance.now();
+      const settled = () => record('compileAsyncWait', returnedAt, performance.now());
+      void result.then(settled, settled);
+      return result;
+    };
+    restorers.push(() => { renderer.compileAsync = compileAsync; });
+  }
+  const initTexture = renderer.initTexture;
+  if (initTexture) {
+    renderer.initTexture = function (this: RendererBackend, ...args) {
+      const start = performance.now();
+      try { return initTexture.apply(this, args); }
+      finally { record('initTexture', start, performance.now()); }
+    };
+    restorers.push(() => { renderer.initTexture = initTexture; });
+  }
+  return {
+    snapshot(): TrialRendererTiming {
+      return {
+        render: { ...timings.render }, compileAsyncCall: { ...timings.compileAsyncCall },
+        compileAsyncWait: { ...timings.compileAsyncWait }, initTexture: { ...timings.initTexture },
+        slowCalls: { ...timings.slowCalls, entries: timings.slowCalls.entries.map(entry => ({ ...entry })) },
+      };
+    },
+    restore(): void {
+      if (restored) return;
+      restored = true;
+      for (const restore of restorers) restore();
+    },
+  };
 }
 
 function effectivePixelRatio(): number {

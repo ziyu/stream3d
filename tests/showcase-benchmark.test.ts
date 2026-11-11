@@ -1,10 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { PerspectiveCamera, Scene, Texture, WebGLRenderer } from 'three';
+import type { RendererBackend } from 'stream3d';
 import type { Story } from '../examples/playground/src/showcase/catalog.js';
 
 const fixture = vi.hoisted(() => ({
-  apps: [] as { destroy: ReturnType<typeof vi.fn> }[],
+  apps: [] as { destroy: ReturnType<typeof vi.fn>; renderer: RendererBackend & { forceContextLoss: ReturnType<typeof vi.fn> } }[],
   sessions: [] as string[],
   failBuild: false,
+  ownedRenderer: false,
+  restoredAtDestroy: [] as boolean[],
+  cleanup: [] as string[],
 }));
 
 vi.mock('../examples/playground/src/showcase/catalog.js', () => ({
@@ -16,8 +21,17 @@ vi.mock('../examples/playground/src/showcase/catalog.js', () => ({
 
 vi.mock('../examples/playground/src/showcase/controller.js', () => ({
   makeApp: vi.fn(() => {
+    const render = vi.fn();
+    const renderer = Object.assign(fixture.ownedRenderer ? Object.create(WebGLRenderer.prototype) : {}, {
+      setSize: vi.fn(), render, dispose: vi.fn(),
+      forceContextLoss: vi.fn(() => { fixture.cleanup.push('context'); }),
+    });
     const app = {
-      present: vi.fn(), destroy: vi.fn(),
+      renderer,
+      present: vi.fn(), destroy: vi.fn(() => {
+        fixture.restoredAtDestroy.push(renderer.render === render);
+        fixture.cleanup.push('app');
+      }),
       diagnostics: () => ({
         estimatedGpuBytes: 300,
         network: { requestsStarted: 2, requestsCompleted: 2, requestsAborted: 0, requestsFailed: 0, requestsActive: 0, bytesReceived: 300, bytesCompleted: 300 },
@@ -47,7 +61,7 @@ vi.mock('../examples/playground/src/showcase/scenes.js', () => ({
   },
 }));
 
-import { runComparison } from '../examples/playground/src/showcase/benchmark.js';
+import { instrumentRenderer, runComparison } from '../examples/playground/src/showcase/benchmark.js';
 
 const story = {
   index: 0, title: 'Fixture', actors: [
@@ -90,6 +104,9 @@ beforeEach(() => {
   fixture.apps = [];
   fixture.sessions = [];
   fixture.failBuild = false;
+  fixture.ownedRenderer = false;
+  fixture.restoredAtDestroy = [];
+  fixture.cleanup = [];
   clock = 0;
   rafId = 0;
   rafs = new Map();
@@ -122,6 +139,7 @@ afterEach(async () => {
 
 describe('showcase comparison lifecycle', () => {
   it('cancels promptly after highest detail is observed while endpoint RAF waits are pending', async () => {
+    fixture.ownedRenderer = true;
     const { controller, result } = run();
     const rejection = expect(result).rejects.toMatchObject({ name: 'AbortError' });
     await flush();
@@ -130,6 +148,9 @@ describe('showcase comparison lifecycle', () => {
     await rejection;
     expect(fixture.apps).toHaveLength(1);
     expect(fixture.apps[0]!.destroy).toHaveBeenCalledTimes(1);
+    expect(fixture.restoredAtDestroy).toEqual([true]);
+    expect(fixture.cleanup).toEqual(['app', 'context']);
+    expect(fixture.apps[0]!.renderer.forceContextLoss).toHaveBeenCalledTimes(1);
     expect(rafs.size).toBe(0);
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -155,6 +176,7 @@ describe('showcase comparison lifecycle', () => {
     }
     expect(report.trials[0]!.viewport).toEqual(report.trials[1]!.viewport);
     expect(fixture.apps.every(app => app.destroy.mock.calls.length === 1)).toBe(true);
+    expect(fixture.apps.every(app => app.renderer.forceContextLoss.mock.calls.length === 0)).toBe(true);
     expect(rafs.size).toBe(0);
   });
 
@@ -233,5 +255,86 @@ describe('showcase comparison lifecycle', () => {
     expect(fixture.apps[0]!.destroy).toHaveBeenCalledTimes(1);
     expect(rafs.size).toBe(0);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('observes renderer calls without changing their receiver, result, errors or promise identity', async () => {
+    clock = 100;
+    const scene = new Scene();
+    const camera = new PerspectiveCamera();
+    const texture = new Texture();
+    const result = {};
+    const failure = new Error('Renderer failure');
+    let reject!: (reason: unknown) => void;
+    const pending = new Promise<unknown>((_resolve, no) => { reject = no; });
+    let throwCompile = false;
+    const renderer: RendererBackend = {
+      setSize() {}, dispose() {},
+      render(receivedScene, receivedCamera) {
+        expect(this).toBe(renderer);
+        expect([receivedScene, receivedCamera]).toEqual([scene, camera]);
+        clock += 70;
+        return result;
+      },
+      compileAsync(receivedScene, receivedCamera) {
+        expect(this).toBe(renderer);
+        expect([receivedScene, receivedCamera]).toEqual([scene, camera]);
+        clock += 5;
+        if (throwCompile) throw failure;
+        return pending;
+      },
+      initTexture(receivedTexture) {
+        expect(this).toBe(renderer);
+        expect(receivedTexture).toBe(texture);
+        clock += 3;
+        throw failure;
+      },
+    };
+    const originals = { render: renderer.render, compileAsync: renderer.compileAsync, initTexture: renderer.initTexture };
+    const probe = instrumentRenderer(renderer, 100);
+    expect(renderer.render(scene, camera)).toBe(result);
+    const returned = renderer.compileAsync!(scene, camera);
+    expect(returned).toBe(pending);
+    expect(() => renderer.initTexture!(texture)).toThrow(failure);
+    clock = 220;
+    const rejection = expect(returned).rejects.toBe(failure);
+    reject(failure);
+    await rejection;
+    expect(probe.snapshot().compileAsyncWait).toMatchObject({ count: 1, totalMs: 45, maxMs: 45 });
+    throwCompile = true;
+    expect(() => renderer.compileAsync!(scene, camera)).toThrow(failure);
+    for (let index = 0; index < 35; index++) renderer.render(scene, camera);
+    const snapshot = probe.snapshot();
+    expect(snapshot.render).toEqual({ count: 36, totalMs: 2520, maxMs: 70, maxStartMs: 0 });
+    expect(snapshot.compileAsyncCall).toMatchObject({ count: 2, totalMs: 10, maxMs: 5 });
+    expect(snapshot.initTexture).toMatchObject({ count: 1, totalMs: 3 });
+    expect(snapshot.slowCalls.entries).toHaveLength(32);
+    expect(snapshot.slowCalls.dropped).toBe(4);
+    expect(snapshot.slowCalls.entries[0]).toEqual({ name: 'render', startMs: 0, durationMs: 70 });
+    probe.restore();
+    probe.restore();
+    expect(renderer.render).toBe(originals.render);
+    expect(renderer.compileAsync).toBe(originals.compileAsync);
+    expect(renderer.initTexture).toBe(originals.initTexture);
+    renderer.render(scene, camera);
+    expect(probe.snapshot().render.count).toBe(36);
+    texture.dispose();
+  });
+
+  it('releases a discarded feed canvas context once after managed app teardown', async () => {
+    const { FeedController } = await vi.importActual<typeof import('../examples/playground/src/showcase/controller.js')>(
+      '../examples/playground/src/showcase/controller.js',
+    );
+    const order: string[] = [];
+    const renderer = Object.assign(Object.create(WebGLRenderer.prototype), {
+      forceContextLoss: vi.fn(() => order.push('context')),
+    });
+    const controller = Object.assign(Object.create(FeedController.prototype), {
+      app: { renderer, destroy: vi.fn(() => order.push('app')) },
+      bundles: new Map([[0, {}]]), generation: 0, disposed: false,
+    }) as InstanceType<typeof FeedController>;
+    controller.destroy();
+    controller.destroy();
+    expect(order).toEqual(['app', 'context']);
+    expect(controller.bundles.size).toBe(0);
   });
 });

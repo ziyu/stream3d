@@ -159,7 +159,11 @@ export class FeedController {
     if (this.disposed) return;
     this.disposed = true;
     ++this.generation;
-    this.app.destroy();
-    this.bundles.clear();
+    try { this.app.destroy(); }
+    finally {
+      this.bundles.clear();
+      // The feed replaces this owned canvas; release its context as well as managed assets.
+      if (this.app.renderer instanceof WebGLRenderer) this.app.renderer.forceContextLoss();
+    }
   }
 }

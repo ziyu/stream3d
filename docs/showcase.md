@@ -124,8 +124,9 @@ Runtime 自身的 `model.timing.firstReadyMs` / `lastReadyMs` 记录粗档请求
 | `phases` | 相对同一次试验开始的毫秒端点：app 创建完成、场景创建起止、`present()` 返回、首个采样 RAF，以及 useful / all objects / highest detail 的准备完成。准备端点记录在各自的两个 RAF 等待之前。 |
 | `resourceTiming` | 最多 128 条本会话已完成的浏览器 Resource Timing：URL、开始/取数/响应起止时间及 HTTP 内容解码前后的响应体大小。与 runtime 的逐块接收计数分开记录。 |
 | `longTasks` | 最多 64 条与试验重叠的主线程长任务，包含起点与持续时间。负的起点表示任务在试验之前已经开始，其完整持续时间可能包含前序工作。 |
+| `rendererTiming` | `render`、`initTexture` 的同步调用耗时，以及 `compileAsync` 的同步调用部分和返回后到 Promise 结算的等待时间；各项记录次数、累计与最大耗时。另保留最多 32 条不短于 50 ms 的调用记录，包含起点与时长。 |
 
-后两项包含 `supported`、`limit`、`dropped` 与 `entries`。浏览器不支持时返回 `supported: false` 和空列表，超出容量的记录只累计数量。时间戳统一以试验开始为零点，缺失的响应起止时间为 `null`；没有记录不等于没有等待。
+`resourceTiming` 和 `longTasks` 包含 `supported`、`limit`、`dropped` 与 `entries`。浏览器不支持时返回 `supported: false` 和空列表，超出容量的记录只累计数量。时间戳统一以试验开始为零点，缺失的响应起止时间为 `null`；没有记录不等于没有等待。renderer 调用与 Promise 等待都是墙钟观测，后者也会包含回调调度时间，不能解读为 GPU 执行耗时。多个实例可以同时等待同一个 shader program，因此异步等待会重叠，各项 `totalMs` 不能相加当作试验总耗时的分解。
 
 CI 的交互验收保留内容流录屏；比较用例关闭录屏和追踪，并在测量报告完成后提取响应体核对字节，减少采集工作对计时的干扰。它仍是 CI 浏览器环境下的功能与观测结果，不替代目标设备测试。这些采集设置只影响测试工具，用户在页面点击比较时的计时策略保持一致。
 
@@ -136,5 +137,7 @@ CI 的交互验收保留内容流录屏；比较用例关闭录屏和追踪，�
 资产缓存的寿命独立于场景窗口：同一 app 内的对象共享解码模板、几何和纹理，各自保留材质、变换和动画状态。失去全部消费者的表示可进入受预算和空闲期限约束的缓存，也可由 Release idle cache 清除。逻辑场景只剩三个并不意味着缓存中只剩三个资产；资源共享也不自动等于 GPU instancing。
 
 `app.clearCache()` 保留活动租约和仍有消费者的加载，不会重置累计计数、已解析的模型 manifest、浏览器缓存或 GPU 驱动缓存。比较工具通过新 app 和新会话隔离 runtime 资产缓存；“冷加载”在这里指资产层面的条件。框架只管理 `scene.addModel()` 创建的资源，经 `scene.root` 加入的自定义 Three.js 资源仍由调用方负责释放。
+
+示例在永久丢弃并替换画布时，先调用 `app.destroy()`，再对自己创建的 `WebGLRenderer` 调用 `forceContextLoss()`，释放该画布的 WebGL context。此策略只用于内容流重建和比较试验结束，核心 `StreamApp.destroy()` 与自定义 renderer 的契约保持不变。显式释放 context 仍不等于清空已经加载的代码或驱动缓存，也不能据此认定先前的延迟来自 context 占用。
 
 实现入口：[内容目录](../examples/playground/src/showcase/catalog.ts)、[场景构建](../examples/playground/src/showcase/scenes.ts)、[浏览控制器](../examples/playground/src/showcase/controller.ts)、[比较工具](../examples/playground/src/showcase/benchmark.ts)。更底层的资源策略见[架构说明](architecture.md)。
